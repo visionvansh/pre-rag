@@ -1,42 +1,77 @@
-# pre-rag — Jina v5 Omni MLX video + transcript retrieval lab
+# pre-rag — Jina v5 Omni MLX multimodal retrieval lab
 
-Local Apple-Silicon test application for ingesting an existing timestamped ASR JSON plus a source video into one Weaviate collection using `jina-embeddings-v5-omni-small-retrieval-mlx`.
+Local Apple-Silicon application for indexing and searching:
 
-## Locked ingestion design
+- **Video + existing ASR transcript**
+- **Image collections**
 
-- **No ASR implementation in this repo.** You provide the video and your existing ASR JSON.
-- Video retrieval chunks: **fixed 10 seconds**, no overlap.
-- Up to **32 sampled frames** per 10-second chunk, normalized to an even frame count for Qwen3-VL temporal pairs.
-- Transcript chunks: LangChain `RecursiveCharacterTextSplitter`.
+with `jina-embeddings-v5-omni-small-retrieval-mlx` and a local Weaviate container.
+
+## Current ingestion design
+
+### Video + transcript
+- Video chunks: **fixed 10 seconds**, no overlap.
+- Up to **32 sampled frames** per 10-second video chunk.
+- Transcript: LangChain `RecursiveCharacterTextSplitter`.
 - Transcript length function: the **local Jina tokenizer**.
-- Baseline transcript chunking: **800 Jina tokens** with **120-token overlap**.
-- Both modalities produce **1024-d** Jina embeddings and are stored as separate objects in one self-provided Weaviate vector space.
-- Video/transcript synchronization is via `asset_id`, `start_sec`, and `end_sec`.
+- Baseline transcript size: **800 Jina tokens**, **120-token overlap**.
+- Existing word timestamps / `utterances[].word_range` are preserved for retrieval timestamps.
 
-## Important Jina MLX compatibility fix
+### Images
+- One Jina embedding per image.
+- Browser upload accepts many images at once.
+- Mac-path mode accepts either one image or a directory; directories are scanned recursively.
+- Generated thumbnails are stored under `data/assets/<asset_id>/thumbs`.
 
-As of the current upstream `jina-embeddings-v5-omni-small-retrieval-mlx/model.py`, the vision forward contains:
+### Shared search space
+All video, transcript and image embeddings are 1024-d Jina retrieval vectors stored in the same self-provided Weaviate vector space.
 
-```python
-mx.repeat(seq_len_i, grid_thw[i, 0])
-```
+That enables:
+- text → transcript
+- text → video
+- text → image
+- image → image
+- image → video/transcript
+- global retrieval across every indexed asset
 
-Recent MLX expects `repeats` to be a native Python `int`, while `grid_thw[i, 0]` is an MLX scalar array. This produces:
+## Persistent asset library
 
-```text
-TypeError: repeat(): incompatible function arguments
-Invoked with types: mlx.core.array, mlx.core.array
-```
+The webpage now loads `data/assets.json` on startup and shows previously indexed assets in the **Indexed asset library** dropdown.
 
-`app/jina_compat.py` applies a narrow, in-memory, idempotent transformation to the checkpoint source at load time:
+This fixes the old behavior where an asset could only become active immediately after a fresh ingestion job.
+
+Selecting an existing asset enables search immediately. Selecting **All indexed assets** performs global retrieval.
+
+The UI also supports:
+- refresh asset list
+- remove an asset from Weaviate without deleting original source files
+- video timestamp seeking from retrieved video/transcript results
+- image preview/gallery from retrieved image results
+- text-query or image-query mode
+- modality filter and result-count selector
+
+## Jina MLX compatibility fix
+
+`app/jina_compat.py` preserves the earlier MLX scalar/int compatibility patch for the current vision tower:
 
 ```python
 mx.repeat(seq_len_i, int(grid_thw[i, 0].item()))
 ```
 
-The downloaded Hugging Face model folder is **not modified**. If upstream Jina already contains the fix, the compatibility layer detects that and does nothing.
+The downloaded Hugging Face checkpoint is not changed on disk.
 
-## Setup
+## Install / update
+
+From your repo:
+
+```bash
+cd "/Volumes/vision/Downloads/codes_necessary/pre-rag"
+git pull origin main
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+If `.venv` does not exist:
 
 ```bash
 python3 -m venv .venv
@@ -46,63 +81,41 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Default model path:
+Default Jina model path:
 
 ```text
 /Volumes/vision/Downloads/codes_necessary/models/jina-embeddings-v5-omni-small-retrieval-mlx
 ```
 
-Change `JINA_MODEL_PATH` in `.env` if needed.
+## Health checks
 
-## Weaviate
-
-If you already have Weaviate running with host ports `8080` and `50051`, keep using it.
-
-Or start the included pinned local configuration:
-
-```bash
-docker compose up -d
-```
-
-Check:
+Weaviate:
 
 ```bash
 python scripts/check_weaviate.py
 ```
 
-Expected:
-
-```text
-Weaviate ready: True
-Collection ready: MediaChunk
-Weaviate check OK
-```
-
-## Model checks — run both before ingestion
-
-Text path:
+Text:
 
 ```bash
 python scripts/check_model.py
 ```
 
-Video path (processor + vision tower + compatibility patch):
+Image vision path:
+
+```bash
+python scripts/check_image_model.py
+```
+
+Video vision path:
 
 ```bash
 python scripts/check_video_model.py
 ```
 
-The second check is specifically designed to catch video-only failures before any transcript vectors are written.
+Run all four before a large ingestion when changing MLX / Transformers versions.
 
-Expected final line:
-
-```text
-Jina MLX video check OK
-```
-
-The output also prints whether the upstream `mx.repeat` compatibility patch was applied.
-
-## Run the webpage
+## Start the app
 
 ```bash
 ./run.sh
@@ -114,76 +127,75 @@ Open:
 http://127.0.0.1:8000
 ```
 
-Use either:
+## Image ingestion
 
-- **Mac path mode** for large source files on `/Volumes/...` (recommended), or
-- browser upload mode.
+Choose **Image collection** from the ingestion workflow dropdown.
 
-The UI displays live stage/progress counters for transcript chunks, fixed 10-second video chunks, and Weaviate objects. After ingestion completes, semantic search is enabled; clicking a result seeks the source video to the result timestamp.
+### Mac paths
+Provide:
+- one image path, or
+- a directory containing images.
 
-## ASR JSON contract
-
-The parser consumes your existing top-level `words[]` objects:
-
-```json
-{"text":"example", "start":10.32, "end":10.72, "speaker":0}
-```
-
-and `utterances[]` objects:
-
-```json
-{"speaker":0, "start":0.16, "end":69.48, "text":"...", "word_range":[0,264]}
-```
-
-`words[]` are the timing source of truth. `utterances[].word_range` provides natural paragraph boundaries before recursive splitting. Each LangChain chunk is mapped back to exact first/last ASR words to recover timestamps and speaker IDs.
-
-## Retrieval behavior
-
-Text queries are encoded with Jina's retrieval-side `Query: ` prefix. Transcript chunks use `Document: `.
-
-Video preprocessing follows Jina's official MLX video quickstart and uses only:
+Supported by this app's PIL ingestion layer:
 
 ```text
-<|vision_start|><|video_pad|><|vision_end|>
+.jpg .jpeg .png .webp .bmp .tif .tiff .gif .avif
 ```
 
-rather than adding a `Document:` text token to the visual input.
+### Browser upload
+Select multiple images in the file picker and click **Upload & ingest**.
 
-Weaviate does **no** embedding generation. It stores the externally generated normalized 1024-d Jina vectors using cosine HNSW.
+Each image is indexed as:
+
+```text
+modality = image
+chunk_id = image_00000 ...
+embedding_dim = 1024
+```
+
+## Searching
+
+The asset library dropdown controls search scope.
+
+- Select one asset to restrict retrieval to it.
+- Select **All indexed assets** for global retrieval.
+
+Then choose:
+
+```text
+Query type:
+- Text query
+- Image query
+
+Result modality:
+- All
+- Images
+- Transcript
+- Video
+```
+
+Image query mode sends the query image through Jina `encode_image()` and performs vector search in exactly the same Weaviate space.
+
+## Existing assets
+
+`git pull` does not remove your ignored `data/` folder, so existing registry entries, uploaded media and generated thumbnails remain in place.
+
+If an original local-path video/image has moved, its vectors remain searchable. Playback/full-image viewing may be unavailable until the source is restored to the recorded path.
+
+## Weaviate
+
+The application generates all embeddings locally. Weaviate does no vectorization.
+
+Expected local ports:
+
+```text
+REST  127.0.0.1:8080
+gRPC  127.0.0.1:50051
+```
 
 ## Tests
 
 ```bash
-pytest -q
 python -m compileall -q app scripts tests
+pytest -q
 ```
-
-## Troubleshooting
-
-### `ModuleNotFoundError: No module named 'app'`
-
-The checked-in scripts add the repository root to `sys.path`; run them from the repo root:
-
-```bash
-python scripts/check_model.py
-```
-
-### `Qwen3VLVideoProcessor requires the Torchvision library`
-
-```bash
-python -m pip install torchvision
-```
-
-`torchvision` is included in `requirements.txt`.
-
-### `mx.repeat ... mlx.core.array, mlx.core.array`
-
-Pull the current repo code and run:
-
-```bash
-python scripts/check_video_model.py
-```
-
-Do **not** hand-edit the downloaded Jina `model.py`; the application compatibility layer handles this narrowly in memory.
-
-See `ARCHITECTURE.md` for the pipeline details.
