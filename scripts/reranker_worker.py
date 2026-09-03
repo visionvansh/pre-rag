@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextlib
+import inspect
 import json
 import os
 import sys
@@ -25,10 +26,60 @@ _model = None
 _torch = None
 _device = None
 _transformers_version = None
+_qwen2vl_compat_initialized = False
+_qwen2vl_mm_token_compat_applied = False
+_qwen2vl_native_mm_token_type_ids = False
+_loading_info: dict[str, Any] | None = None
 
 
 def _log(message: str) -> None:
     print(f"[reranker-worker] {message}", file=sys.stderr, flush=True)
+
+
+def _install_qwen2vl_mm_token_compat() -> None:
+    """Bridge Jina's newer forward signature onto Transformers 4.48.3.
+
+    The m0 Sentence-Transformers integration (94bfe0a) started forwarding
+    ``mm_token_type_ids`` into Qwen2-VL. Transformers 4.48.3 deliberately stays
+    on the older Qwen2-VL module layout that matches the checkpoint weights, and
+    its forward() predates this keyword.
+
+    In 4.48.3 the equivalent multimodal RoPE information is derived directly
+    from input_ids plus image/video grid metadata in get_rope_index(). Therefore
+    the compatibility action for this exact version is to accept the newer
+    keyword at the base-class boundary and discard only that redundant keyword.
+    """
+
+    global _qwen2vl_compat_initialized
+    global _qwen2vl_mm_token_compat_applied
+    global _qwen2vl_native_mm_token_type_ids
+
+    if _qwen2vl_compat_initialized:
+        return
+
+    from transformers import Qwen2VLForConditionalGeneration
+
+    original_forward = Qwen2VLForConditionalGeneration.forward
+    params = inspect.signature(original_forward, follow_wrapped=False).parameters
+    _qwen2vl_native_mm_token_type_ids = "mm_token_type_ids" in params
+
+    if not _qwen2vl_native_mm_token_type_ids:
+        def forward_compat(self, *args, mm_token_type_ids=None, **kwargs):
+            # Do not pass mm_token_type_ids into the 4.48.3 base forward.
+            # That version reconstructs multimodal RoPE from token ids/grid_thw.
+            return original_forward(self, *args, **kwargs)
+
+        forward_compat.__name__ = original_forward.__name__
+        forward_compat.__qualname__ = original_forward.__qualname__
+        forward_compat.__doc__ = original_forward.__doc__
+        Qwen2VLForConditionalGeneration.forward = forward_compat
+        _qwen2vl_mm_token_compat_applied = True
+        _log(
+            "installed Qwen2-VL mm_token_type_ids compatibility bridge "
+            "(4.48.3 derives multimodal RoPE from input_ids/grid_thw)"
+        )
+
+    _qwen2vl_compat_initialized = True
 
 
 def _validate_environment():
@@ -42,8 +93,11 @@ def _validate_environment():
         raise RuntimeError(
             "jina-reranker-m0 must run in the dedicated compatibility environment. "
             f"Expected transformers=={EXPECTED_TRANSFORMERS}, got {_transformers_version}. "
-            "Run ./scripts/setup_reranker_env.sh and keep the main .venv unchanged."
+            "Run: zsh scripts/setup_reranker_env.sh and keep the main .venv unchanged."
         )
+
+    _install_qwen2vl_mm_token_compat()
+
     if not MODEL_PATH.is_dir():
         raise FileNotFoundError(f"Jina reranker path not found: {MODEL_PATH}")
     for name in ("config.json", "model.safetensors", "modeling.py"):
@@ -67,6 +121,29 @@ def _resolve_device(torch) -> str:
     raise ValueError("RERANKER_DEVICE must be one of: auto, mps, cpu")
 
 
+def _validate_loading_info(info: dict[str, Any]) -> None:
+    missing = list(info.get("missing_keys") or [])
+    mismatched = list(info.get("mismatched_keys") or [])
+    unexpected = list(info.get("unexpected_keys") or [])
+    errors = list(info.get("error_msgs") or [])
+
+    # Jina intentionally replaces the LM head with Identity; its checkpoint may
+    # therefore report lm_head.weight as unused. Everything else must match.
+    allowed_unexpected = {"lm_head.weight"}
+    bad_unexpected = [key for key in unexpected if key not in allowed_unexpected]
+
+    if missing or mismatched or bad_unexpected or errors:
+        raise RuntimeError(
+            "Unsafe jina-reranker-m0 checkpoint load detected. "
+            f"missing={missing[:8]}, mismatched={mismatched[:8]}, "
+            f"unexpected={bad_unexpected[:8]}, errors={errors[:3]}. "
+            "Refusing to rerank with partially/randomly initialized weights."
+        )
+
+    if unexpected:
+        _log("checkpoint load note: lm_head.weight is intentionally unused by Jina's ranking model")
+
+
 def _architecture_sanity(model) -> None:
     base = getattr(model, "model", None)
     if base is None:
@@ -84,16 +161,22 @@ def _architecture_sanity(model) -> None:
         raise RuntimeError("Loaded model is missing the Jina ranking head (.score)")
 
     names = dict(model.named_parameters())
-    representative = "model.layers.0.self_attn.q_proj.weight"
-    if representative not in names:
+    required = (
+        "model.layers.0.self_attn.q_proj.weight",
+        "score.0.weight",
+        "score.2.weight",
+    )
+    missing = [name for name in required if name not in names]
+    if missing:
         raise RuntimeError(
-            f"Expected checkpoint parameter layout is absent ({representative}). "
-            "Refusing to rerank with partially/randomly initialized weights."
+            "Expected m0 checkpoint parameter layout is absent: "
+            + ", ".join(missing)
+            + ". Refusing to rerank with an incompatible model."
         )
 
 
 def _load():
-    global _model, _device
+    global _model, _device, _loading_info
     if _model is not None:
         return _model
 
@@ -105,6 +188,7 @@ def _load():
         "trust_remote_code": True,
         "local_files_only": True,
         "torch_dtype": "auto",
+        "output_loading_info": True,
     }
     if ATTENTION:
         kwargs["attn_implementation"] = ATTENTION
@@ -114,13 +198,24 @@ def _load():
         f"torch={torch.__version__}, device={_device}"
     )
     with contextlib.redirect_stdout(sys.stderr):
-        model = AutoModel.from_pretrained(str(MODEL_PATH), **kwargs)
+        loaded = AutoModel.from_pretrained(str(MODEL_PATH), **kwargs)
+        if not (isinstance(loaded, tuple) and len(loaded) == 2):
+            raise RuntimeError(
+                "Transformers did not return checkpoint loading diagnostics; "
+                "cannot safely validate jina-reranker-m0 weights."
+            )
+        model, loading_info = loaded
+        _validate_loading_info(loading_info)
         _architecture_sanity(model)
         model.eval()
         model.to(_device)
 
+    _loading_info = loading_info
     _model = model
-    _log("model loaded with compatible pre-refactor Qwen2-VL parameter layout")
+    _log(
+        "model loaded with compatible pre-refactor Qwen2-VL parameter layout "
+        "and validated checkpoint weights"
+    )
     return model
 
 
@@ -137,6 +232,9 @@ def _status(load: bool = False) -> dict[str, Any]:
         "expected_transformers": EXPECTED_TRANSFORMERS,
         "model_path": str(MODEL_PATH),
         "architecture": "qwen2_vl_pre_refactor",
+        "native_mm_token_type_ids": _qwen2vl_native_mm_token_type_ids,
+        "mm_token_type_compat_applied": _qwen2vl_mm_token_compat_applied,
+        "checkpoint_loading_validated": _loading_info is not None,
     }
 
 
@@ -191,6 +289,7 @@ def _preflight() -> dict[str, Any]:
         "text_scores": text_scores,
         "image_scores": image_scores,
         "text_relevant_ranked_higher": bool(text_scores[0] > text_scores[1]),
+        "image_relevant_ranked_higher": bool(image_scores[0] > image_scores[1]),
     }
 
 
