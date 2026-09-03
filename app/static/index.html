@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Jina v5 Omni Video RAG Lab</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <main class="shell">
+    <header class="hero">
+      <div>
+        <p class="eyebrow">LOCAL APPLE-SILICON LAB</p>
+        <h1>Jina v5 Omni · Video + Transcript Retrieval</h1>
+        <p class="sub">10-second video embeddings + recursive timestamped transcript embeddings → one Weaviate vector space.</p>
+      </div>
+      <div id="healthPill" class="pill neutral">Checking system…</div>
+    </header>
+
+    <section class="grid two">
+      <article class="card">
+        <div class="card-head">
+          <div><span class="step">01</span><h2>Inputs</h2></div>
+          <span class="muted">Local-path mode is best for large videos.</span>
+        </div>
+
+        <div class="tabs">
+          <button id="pathTab" class="tab active">Mac paths</button>
+          <button id="uploadTab" class="tab">Browser upload</button>
+        </div>
+
+        <form id="pathForm" class="form-pane active">
+          <label>Video path
+            <input id="videoPath" placeholder="/Volumes/vision/.../video.mp4" required />
+          </label>
+          <label>ASR JSON path
+            <input id="transcriptPath" placeholder="/Volumes/vision/.../transcript.json" required />
+          </label>
+          <label>Asset label <span class="muted">optional</span>
+            <input id="assetName" placeholder="My test video" />
+          </label>
+          <button class="primary" type="submit">Start ingestion</button>
+        </form>
+
+        <form id="uploadForm" class="form-pane">
+          <label>Video file<input id="videoFile" type="file" accept="video/*" required /></label>
+          <label>ASR JSON<input id="transcriptFile" type="file" accept="application/json,.json,.txt" required /></label>
+          <label>Asset label <span class="muted">optional</span><input id="uploadAssetName" /></label>
+          <p class="note">Uploads copy the video into the app data folder. For large files on your Mac, use path mode instead.</p>
+          <button class="primary" type="submit">Upload & ingest</button>
+        </form>
+      </article>
+
+      <article class="card">
+        <div class="card-head">
+          <div><span class="step">02</span><h2>Pipeline progress</h2></div>
+          <strong id="percent">0%</strong>
+        </div>
+        <div class="progress"><div id="bar"></div></div>
+        <div class="stage-block">
+          <h3 id="stage">Waiting for input</h3>
+          <p id="detail" class="muted">The progress monitor will appear here.</p>
+        </div>
+        <div class="metrics">
+          <div><span>Transcript</span><strong id="textCounter">—</strong></div>
+          <div><span>Video 10s</span><strong id="videoCounter">—</strong></div>
+          <div><span>Weaviate</span><strong id="objectCounter">—</strong></div>
+        </div>
+        <pre id="errorBox" class="error hidden"></pre>
+      </article>
+    </section>
+
+    <section id="searchSection" class="grid search-grid disabled">
+      <article class="card player-card">
+        <div class="card-head"><div><span class="step">03</span><h2>Source video</h2></div><span id="assetLabel" class="muted">No indexed asset</span></div>
+        <video id="videoPlayer" controls preload="metadata"></video>
+        <div id="seekLabel" class="seek-label">Select a search result to jump to its timestamp.</div>
+      </article>
+
+      <article class="card search-card">
+        <div class="card-head"><div><span class="step">04</span><h2>Semantic search</h2></div><span class="muted">Jina query → shared Weaviate index</span></div>
+        <form id="searchForm" class="search-row">
+          <input id="searchQuery" placeholder="e.g. where does he discuss competition?" autocomplete="off" />
+          <select id="modalityFilter">
+            <option value="all">All modalities</option>
+            <option value="transcript">Transcript only</option>
+            <option value="video">Video only</option>
+          </select>
+          <button class="primary" type="submit">Search</button>
+        </form>
+        <div id="results" class="results"><div class="empty">Index a video, then search it here.</div></div>
+      </article>
+    </section>
+
+    <footer>
+      <span>Video chunks: fixed 10s · Transcript: LangChain recursive splitter · Embeddings: Jina v5 Omni MLX 1024-d</span>
+    </footer>
+  </main>
+<script src="/static/app.js"></script>
+</body>
+</html>
