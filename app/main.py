@@ -17,7 +17,13 @@ from .ingestion import run_ingestion
 from .jina_mlx import embedder
 from .job_store import jobs
 from .registry import registry
-from .schemas import ImagePathIngestRequest, PathIngestRequest, SearchRequest
+from .schemas import (
+    ImagePathIngestRequest,
+    PathIngestRequest,
+    SearchRequest,
+    TextPathIngestRequest,
+)
+from .text_ingestion import discover_text_paths, run_text_ingestion
 from .weaviate_store import store
 
 
@@ -51,7 +57,7 @@ def health():
         "video_max_frames": settings.video_max_frames,
         "transcript_chunk_tokens": settings.transcript_chunk_tokens,
         "transcript_overlap_tokens": settings.transcript_overlap_tokens,
-        "supported_modalities": ["transcript", "video", "image"],
+        "supported_modalities": ["transcript", "video", "image", "text"],
     }
 
 
@@ -59,13 +65,23 @@ def _public_asset(asset_id: str) -> dict:
     public = registry.get_public(asset_id)
     if not public:
         raise HTTPException(404, "Asset not found")
+
     if public["asset_type"] == "video":
-        public["media_url"] = f"/api/assets/{asset_id}/media" if public["media_available"] else None
+        public["media_url"] = (
+            f"/api/assets/{asset_id}/media" if public["media_available"] else None
+        )
         public["preview_urls"] = []
-    else:
+    elif public["asset_type"] == "images":
         count = public["image_count"]
         public["media_url"] = None
-        public["preview_urls"] = [f"/api/assets/{asset_id}/thumb/{i}" for i in range(min(count, 24))]
+        public["preview_urls"] = [
+            f"/api/assets/{asset_id}/thumb/{i}"
+            for i in range(min(count, 24))
+        ]
+    else:
+        public["media_url"] = None
+        public["preview_urls"] = []
+
     return public
 
 
@@ -199,6 +215,51 @@ async def ingest_images_upload(
     return {"job_id": job.id, "image_count": len(paths)}
 
 
+@app.post("/api/ingest/texts/path")
+async def ingest_texts_path(request: TextPathIngestRequest):
+    paths = discover_text_paths(request.text_path)
+    job = jobs.create()
+    asyncio.create_task(
+        asyncio.to_thread(
+            run_text_ingestion,
+            job.id,
+            [str(path) for path in paths],
+            request.asset_name,
+        )
+    )
+    return {"job_id": job.id, "text_file_count": len(paths)}
+
+
+@app.post("/api/ingest/texts/upload")
+async def ingest_texts_upload(
+    texts: list[UploadFile] = File(...),
+    asset_name: str | None = Form(default=None),
+):
+    if not texts:
+        raise HTTPException(400, "Upload at least one text file")
+
+    upload_id = str(uuid4())
+    upload_dir = settings.uploads_dir / upload_id / "texts"
+    paths: list[Path] = []
+
+    for index, upload in enumerate(texts):
+        safe_name = Path(upload.filename or f"text_{index:05d}.txt").name
+        destination = upload_dir / f"{index:05d}_{safe_name}"
+        await _save_upload(upload, destination)
+        paths.append(destination)
+
+    job = jobs.create()
+    asyncio.create_task(
+        asyncio.to_thread(
+            run_text_ingestion,
+            job.id,
+            [str(path) for path in paths],
+            asset_name,
+        )
+    )
+    return {"job_id": job.id, "text_file_count": len(paths)}
+
+
 @app.get("/api/jobs/{job_id}")
 def get_job(job_id: str):
     job = jobs.get(job_id)
@@ -222,22 +283,39 @@ def _decorate_results(rows: list[dict]) -> list[dict]:
             row["thumbnail_url"] = None
 
         if modality == "image" and asset_id:
-            row["image_url"] = f"/api/assets/{asset_id}/image/{int(row.get('chunk_index', 0))}"
+            row["image_url"] = (
+                f"/api/assets/{asset_id}/image/{int(row.get('chunk_index', 0))}"
+            )
         else:
             row["image_url"] = None
 
-        if payload and registry.asset_type(payload) == "video" and public and public["media_available"]:
+        if (
+            payload
+            and registry.asset_type(payload) == "video"
+            and public
+            and public["media_available"]
+        ):
             row["media_url"] = f"/api/assets/{asset_id}/media"
         else:
             row["media_url"] = None
+
     return rows
 
 
 @app.post("/api/search")
 def search(request: SearchRequest):
     query_vector = embedder.embed_query(request.query)
-    rows = store.search(query_vector, request.asset_id, request.modality, request.limit)
-    return {"query": request.query, "query_type": "text", "results": _decorate_results(rows)}
+    rows = store.search(
+        query_vector,
+        request.asset_id,
+        request.modality,
+        request.limit,
+    )
+    return {
+        "query": request.query,
+        "query_type": "text",
+        "results": _decorate_results(rows),
+    }
 
 
 @app.post("/api/search/image")
@@ -247,13 +325,15 @@ async def search_by_image(
     modality: str = Form(default="all"),
     limit: int = Form(default=12),
 ):
-    if modality not in {"all", "video", "transcript", "image"}:
+    if modality not in {"all", "video", "transcript", "image", "text"}:
         raise HTTPException(400, "Invalid modality filter")
+
     limit = max(1, min(50, int(limit)))
     data = await query_image.read()
     await query_image.close()
     if not data:
         raise HTTPException(400, "Query image is empty")
+
     try:
         with Image.open(BytesIO(data)) as raw:
             image = ImageOps.exif_transpose(raw).convert("RGB")
@@ -276,6 +356,7 @@ def media(asset_id: str):
         raise HTTPException(404, "Asset not found")
     if registry.asset_type(asset) != "video":
         raise HTTPException(400, "This asset is not a video")
+
     path = Path(asset.get("video_path") or "")
     if not path.exists():
         raise HTTPException(404, "Original video file is no longer available")
@@ -289,9 +370,11 @@ def image_media(asset_id: str, image_index: int):
         raise HTTPException(404, "Asset not found")
     if registry.asset_type(asset) != "images":
         raise HTTPException(400, "This asset is not an image collection")
+
     paths = asset.get("image_paths") or []
     if image_index < 0 or image_index >= len(paths):
         raise HTTPException(404, "Image index out of range")
+
     path = Path(paths[image_index])
     if not path.is_file():
         raise HTTPException(404, "Original image file is no longer available")
