@@ -17,6 +17,8 @@ from .weaviate_store import store
 
 
 MODEL_NAME = "jina-embeddings-v5-omni-small-retrieval-mlx"
+MIN_VIDEO_CHUNK_SECONDS = 1.0
+MAX_VIDEO_CHUNK_SECONDS = 120.0
 
 
 def _asset_id(asr: dict, video_path: Path) -> str:
@@ -26,6 +28,20 @@ def _asset_id(asr: dict, video_path: Path) -> str:
     stat = video_path.stat()
     seed = f"{video_path.resolve()}|{stat.st_size}|{stat.st_mtime_ns}"
     return hashlib.sha256(seed.encode()).hexdigest()[:24]
+
+
+def _resolve_chunk_seconds(value: float | None) -> float:
+    seconds = float(settings.video_chunk_seconds if value is None else value)
+    if not MIN_VIDEO_CHUNK_SECONDS <= seconds <= MAX_VIDEO_CHUNK_SECONDS:
+        raise ValueError(
+            f"video_chunk_seconds must be between {MIN_VIDEO_CHUNK_SECONDS:g} and "
+            f"{MAX_VIDEO_CHUNK_SECONDS:g}; got {seconds:g}"
+        )
+    return seconds
+
+
+def _fmt_seconds(seconds: float) -> str:
+    return f"{seconds:g}s"
 
 
 def _set(job_id: str, pct: float, stage: str, detail: str, **counters):
@@ -42,11 +58,24 @@ def _set(job_id: str, pct: float, stage: str, detail: str, **counters):
     )
 
 
-def _run_ingestion(job_id: str, video_path: str, transcript_path: str, asset_name: str | None = None):
+def _run_ingestion(
+    job_id: str,
+    video_path: str,
+    transcript_path: str,
+    asset_name: str | None = None,
+    video_chunk_seconds: float | None = None,
+):
     try:
+        chunk_seconds = _resolve_chunk_seconds(video_chunk_seconds)
         video = Path(video_path).expanduser().resolve()
         transcript = Path(transcript_path).expanduser().resolve()
-        _set(job_id, 2, "Validate inputs", "Checking video and ASR JSON")
+        _set(
+            job_id,
+            2,
+            "Validate inputs",
+            f"Checking video and ASR JSON · video window {_fmt_seconds(chunk_seconds)}",
+            video_chunk_seconds=chunk_seconds,
+        )
         if not video.is_file():
             raise FileNotFoundError(f"Video not found: {video}")
         if not transcript.is_file():
@@ -65,6 +94,8 @@ def _run_ingestion(job_id: str, video_path: str, transcript_path: str, asset_nam
         _set(job_id, 9, "Video preflight", "Testing Jina video processor and MLX vision tower")
         embedder.video_preflight()
 
+        # Re-ingesting the same source with a different window intentionally replaces
+        # the previous vectors for that asset instead of mixing incompatible chunk grids.
         store.delete_asset(asset_id)
 
         _set(job_id, 12, "Chunk transcript", "Recursive LangChain chunking with the Jina tokenizer")
@@ -75,15 +106,18 @@ def _run_ingestion(job_id: str, video_path: str, transcript_path: str, asset_nam
             chunk_overlap=settings.transcript_overlap_tokens,
         )
         _set(
-            job_id, 15, "Chunk transcript",
+            job_id,
+            15,
+            "Chunk transcript",
             f"Created {len(text_chunks)} timestamped recursive transcript chunks",
-            transcript_total=len(text_chunks), transcript_done=0,
+            transcript_total=len(text_chunks),
+            transcript_done=0,
         )
 
         batch_size = 8
         done = 0
         for offset in range(0, len(text_chunks), batch_size):
-            batch = text_chunks[offset: offset + batch_size]
+            batch = text_chunks[offset : offset + batch_size]
             vectors = embedder.embed_documents_batch([c.text for c in batch])
             for chunk, vector in zip(batch, vectors):
                 chunk_id = f"transcript_{chunk.chunk_index:05d}"
@@ -110,7 +144,9 @@ def _run_ingestion(job_id: str, video_path: str, transcript_path: str, asset_nam
                 done += 1
             pct = 15 + 15 * (done / max(1, len(text_chunks)))
             _set(
-                job_id, pct, "Index transcript",
+                job_id,
+                pct,
+                "Index transcript",
                 f"Embedded/indexed transcript chunk {done}/{len(text_chunks)}",
                 transcript_done=done,
                 weaviate_objects=done,
@@ -118,11 +154,15 @@ def _run_ingestion(job_id: str, video_path: str, transcript_path: str, asset_nam
 
         info = probe_video(video)
         duration = info["duration_sec"]
-        video_total = int(math.ceil(duration / settings.video_chunk_seconds))
+        video_total = int(math.ceil(duration / chunk_seconds))
         _set(
-            job_id, 32, "Chunk video",
-            f"Video duration {duration:.1f}s → about {video_total} fixed 10-second chunks",
-            video_total=video_total, video_done=0,
+            job_id,
+            32,
+            "Chunk video",
+            f"Video duration {duration:.1f}s → about {video_total} × {_fmt_seconds(chunk_seconds)} windows",
+            video_total=video_total,
+            video_done=0,
+            video_chunk_seconds=chunk_seconds,
         )
 
         asset_dir = settings.assets_dir / asset_id
@@ -132,7 +172,7 @@ def _run_ingestion(job_id: str, video_path: str, transcript_path: str, asset_nam
         video_done = 0
         for chunk in iter_video_chunks(
             video,
-            chunk_seconds=settings.video_chunk_seconds,
+            chunk_seconds=chunk_seconds,
             max_frames=settings.video_max_frames,
         ):
             vector = embedder.embed_video_frames(chunk.frames)
@@ -164,8 +204,10 @@ def _run_ingestion(job_id: str, video_path: str, transcript_path: str, asset_nam
             video_done += 1
             pct = 32 + 63 * (video_done / max(1, video_total))
             _set(
-                job_id, pct, "Embed/index video",
-                f"10-second video chunk {video_done}/{video_total} indexed",
+                job_id,
+                pct,
+                "Embed/index video",
+                f"{_fmt_seconds(chunk_seconds)} video window {video_done}/{video_total} indexed",
                 video_done=video_done,
                 weaviate_objects=len(text_chunks) + video_done,
             )
@@ -179,6 +221,7 @@ def _run_ingestion(job_id: str, video_path: str, transcript_path: str, asset_nam
                 "video_path": str(video),
                 "transcript_path": str(transcript),
                 "duration_sec": duration,
+                "video_chunk_seconds": chunk_seconds,
                 "video_chunks": video_done,
                 "transcript_chunks": len(text_chunks),
                 "image_count": 0,
@@ -191,12 +234,16 @@ def _run_ingestion(job_id: str, video_path: str, transcript_path: str, asset_nam
             status="completed",
             stage="Complete",
             overall_pct=100.0,
-            detail=f"Indexed {total_objects} objects for asset {asset_id}",
+            detail=(
+                f"Indexed {total_objects} objects for asset {asset_id} · "
+                f"video window {_fmt_seconds(chunk_seconds)}"
+            ),
             counters={
                 "transcript_total": len(text_chunks),
                 "transcript_done": len(text_chunks),
                 "video_total": video_total,
                 "video_done": video_done,
+                "video_chunk_seconds": chunk_seconds,
                 "weaviate_objects": total_objects,
             },
         )
@@ -213,7 +260,13 @@ def _run_ingestion(job_id: str, video_path: str, transcript_path: str, asset_nam
 INGEST_LOCK = Lock()
 
 
-def run_ingestion(job_id: str, video_path: str, transcript_path: str, asset_name: str | None = None):
+def run_ingestion(
+    job_id: str,
+    video_path: str,
+    transcript_path: str,
+    asset_name: str | None = None,
+    video_chunk_seconds: float | None = None,
+):
     if not INGEST_LOCK.acquire(blocking=False):
         jobs.update(
             job_id,
@@ -223,6 +276,12 @@ def run_ingestion(job_id: str, video_path: str, transcript_path: str, asset_name
         )
         INGEST_LOCK.acquire()
     try:
-        return _run_ingestion(job_id, video_path, transcript_path, asset_name)
+        return _run_ingestion(
+            job_id,
+            video_path,
+            transcript_path,
+            asset_name,
+            video_chunk_seconds,
+        )
     finally:
         INGEST_LOCK.release()

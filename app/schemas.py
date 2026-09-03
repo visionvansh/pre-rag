@@ -7,6 +7,7 @@ class PathIngestRequest(BaseModel):
     video_path: str
     transcript_path: str
     asset_name: str | None = None
+    video_chunk_seconds: float | None = Field(default=None, ge=1.0, le=120.0)
 
 
 class ImagePathIngestRequest(BaseModel):

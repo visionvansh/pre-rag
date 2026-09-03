@@ -6,6 +6,9 @@ let currentAssetInfo = null;
 let assetRows = [];
 let pollTimer = null;
 let lastResults = [];
+let chunkMin = 1;
+let chunkMax = 120;
+let chunkDefault = 10;
 
 function fmtTime(sec=0){
   const s=Math.max(0,Number(sec)||0),h=Math.floor(s/3600),m=Math.floor((s%3600)/60),r=Math.floor(s%60);
@@ -13,11 +16,51 @@ function fmtTime(sec=0){
 }
 function esc(s=''){return String(s).replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]))}
 function assetIcon(a){return a.asset_type==='images'?'🖼️':'🎬'}
+function fmtSeconds(value){
+  const n=Number(value);
+  if(!Number.isFinite(n)) return '—';
+  return `${Number.isInteger(n)?n:n.toFixed(1).replace(/\.0$/,'')}s`;
+}
+function clampChunkSeconds(value){
+  const n=Number(value);
+  if(!Number.isFinite(n)) return chunkDefault;
+  return Math.max(chunkMin,Math.min(chunkMax,n));
+}
+function setChunkControl(prefix,value){
+  const v=clampChunkSeconds(value);
+  const range=$(`${prefix}ChunkRange`),input=$(`${prefix}ChunkSeconds`),out=$(`${prefix}ChunkValue`);
+  if(range){range.min=String(chunkMin);range.max=String(chunkMax);range.value=String(v)}
+  if(input){input.min=String(chunkMin);input.max=String(chunkMax);input.value=String(v)}
+  if(out)out.textContent=fmtSeconds(v);
+}
+function bindChunkControl(prefix){
+  const range=$(`${prefix}ChunkRange`),input=$(`${prefix}ChunkSeconds`),out=$(`${prefix}ChunkValue`);
+  if(!range||!input||!out)return;
+  const update=(raw,commit=false)=>{
+    let v=Number(raw);
+    if(!Number.isFinite(v))v=chunkDefault;
+    if(commit)v=clampChunkSeconds(v);
+    range.value=String(clampChunkSeconds(v));
+    if(commit||document.activeElement!==input)input.value=String(clampChunkSeconds(v));
+    out.textContent=fmtSeconds(clampChunkSeconds(v));
+  };
+  range.addEventListener('input',()=>{input.value=range.value;out.textContent=fmtSeconds(range.value)});
+  input.addEventListener('input',()=>update(input.value,false));
+  input.addEventListener('change',()=>{const v=clampChunkSeconds(input.value);input.value=String(v);range.value=String(v);out.textContent=fmtSeconds(v)});
+}
+function selectedChunkSeconds(prefix){
+  return clampChunkSeconds($(`${prefix}ChunkSeconds`)?.value ?? chunkDefault);
+}
 
 async function checkHealth(){
   const p=$('healthPill');
   try{
     const r=await fetch('/api/health'); const h=await r.json();
+    chunkMin=Number(h.video_chunk_seconds_min||1);
+    chunkMax=Number(h.video_chunk_seconds_max||120);
+    chunkDefault=clampChunkSeconds(h.video_chunk_seconds||10);
+    setChunkControl('path',chunkDefault);
+    setChunkControl('upload',chunkDefault);
     if(h.model_exists&&h.weaviate_ready){p.textContent='MLX + Weaviate ready';p.className='pill ok'}
     else{p.textContent=`Needs attention · ${!h.model_exists?'model ':''}${!h.weaviate_ready?'weaviate':''}`;p.className='pill bad';p.title=h.weaviate_error||h.model_path}
   }catch(e){p.textContent='Backend unavailable';p.className='pill bad'}
@@ -45,8 +88,15 @@ async function startPath(e){
   let endpoint, body;
   if(mode==='video'){
     if(!$('videoPath').value.trim()||!$('transcriptPath').value.trim()) throw new Error('Video path and ASR JSON path are required.');
+    const videoChunkSeconds=selectedChunkSeconds('path');
     endpoint='/api/ingest/path';
-    body={video_path:$('videoPath').value.trim(),transcript_path:$('transcriptPath').value.trim(),asset_name:$('assetName').value.trim()||null};
+    body={
+      video_path:$('videoPath').value.trim(),
+      transcript_path:$('transcriptPath').value.trim(),
+      asset_name:$('assetName').value.trim()||null,
+      video_chunk_seconds:videoChunkSeconds
+    };
+    $('videoCounterLabel').textContent=`Video ${fmtSeconds(videoChunkSeconds)}`;
   }else{
     if(!$('imagePath').value.trim()) throw new Error('Image file/folder path is required.');
     endpoint='/api/ingest/images/path';
@@ -65,8 +115,11 @@ async function startUpload(e){
   if(mode==='video'){
     const v=$('videoFile').files[0],t=$('transcriptFile').files[0];
     if(!v||!t) throw new Error('Choose both a video and ASR JSON.');
+    const videoChunkSeconds=selectedChunkSeconds('upload');
     endpoint='/api/ingest/upload';
     fd.append('video',v);fd.append('transcript',t);
+    fd.append('video_chunk_seconds',String(videoChunkSeconds));
+    $('videoCounterLabel').textContent=`Video ${fmtSeconds(videoChunkSeconds)}`;
   }else{
     const imgs=[...$('imageFiles').files];
     if(!imgs.length) throw new Error('Choose at least one image.');
@@ -96,9 +149,7 @@ async function pollJob(){
     renderJob(j);
     if(j.status==='completed'||j.status==='failed'){
       clearInterval(pollTimer);pollTimer=null;
-      if(j.status==='completed'){
-        await loadAssets(j.asset_id);
-      }
+      if(j.status==='completed')await loadAssets(j.asset_id);
     }
   }catch(e){showTopError(e)}
 }
@@ -110,6 +161,7 @@ function renderJob(j){
   $('detail').textContent=j.detail||'';
   const c=j.counters||{};
   $('textCounter').textContent=c.transcript_total!=null?`${c.transcript_done||0}/${c.transcript_total}`:'—';
+  if(c.video_chunk_seconds!=null)$('videoCounterLabel').textContent=`Video ${fmtSeconds(c.video_chunk_seconds)}`;
   $('videoCounter').textContent=c.video_total!=null?`${c.video_done||0}/${c.video_total}`:'—';
   $('imageCounter').textContent=c.image_total!=null?`${c.image_done||0}/${c.image_total}`:'—';
   $('objectCounter').textContent=c.weaviate_objects!=null?c.weaviate_objects:'—';
@@ -132,7 +184,9 @@ async function loadAssets(preferId=null){
   assetRows.forEach(a=>{
     const opt=document.createElement('option');
     opt.value=a.asset_id;
-    const count=a.asset_type==='images'?`${a.image_count} images`:`${a.video_chunks} video + ${a.transcript_chunks} text`;
+    const count=a.asset_type==='images'
+      ?`${a.image_count} images`
+      :`${a.video_chunks} × ${fmtSeconds(a.video_chunk_seconds||chunkDefault)} video + ${a.transcript_chunks} text`;
     opt.textContent=`${assetIcon(a)} ${a.name} · ${count}`;
     select.appendChild(opt);
   });
@@ -184,7 +238,8 @@ async function activateAsset(assetId){
     }else{
       $('emptyPreview').textContent='The vectors are still searchable, but the original video file is no longer at its saved path.';
     }
-    $('assetSummary').innerHTML=`<strong>${esc(a.name)}</strong> · video · ${a.video_chunks} visual chunks · ${a.transcript_chunks} transcript chunks · ${a.weaviate_objects} Weaviate objects${a.media_available?'':' · source file unavailable'}`;
+    const chunkSeconds=fmtSeconds(a.video_chunk_seconds||chunkDefault);
+    $('assetSummary').innerHTML=`<strong>${esc(a.name)}</strong> · video · ${a.video_chunks} visual chunks at ${chunkSeconds}/chunk · ${a.transcript_chunks} transcript chunks · ${a.weaviate_objects} Weaviate objects${a.media_available?'':' · source file unavailable'}`;
   }else{
     setPreview('images');
     renderGallery(a);
@@ -266,10 +321,7 @@ function renderResults(rows){
   if(!rows.length){$('results').innerHTML='<div class="empty">No matching indexed items.</div>';return}
   $('results').innerHTML=rows.map((r,i)=>{
     const visual=r.thumbnail_url?`<img class="thumb" src="${r.thumbnail_url}" loading="lazy">`:`<div class="text-thumb">TRANSCRIPT</div>`;
-    const preview=r.text||(
-      r.modality==='image'?`Image · ${r.source_name||''}`:
-      `Visual 10-second video segment`
-    );
+    const preview=r.text||(r.modality==='image'?`Image · ${r.source_name||''}`:`Visual video segment`);
     const dist=r.distance==null?'—':Number(r.distance).toFixed(4);
     const interval=r.modality==='image'?'':` · ${fmtTime(r.start_sec)}–${fmtTime(r.end_sec)}`;
     return `<div class="result" data-i="${i}">
@@ -305,6 +357,8 @@ async function openResult(r){
   }
 }
 
+bindChunkControl('path');
+bindChunkControl('upload');
 setIngestMode();
 setQueryType();
 checkHealth();

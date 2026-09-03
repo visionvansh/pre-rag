@@ -78,9 +78,13 @@ class AssetRegistry:
             video_path = Path(payload.get("video_path") or "")
             media_available = bool(payload.get("video_path")) and video_path.is_file()
             image_count = 0
+            video_chunk_seconds = float(
+                payload.get("video_chunk_seconds") or settings.video_chunk_seconds
+            )
         else:
             media_available = any(p.is_file() for p in image_paths)
             image_count = int(payload.get("image_count") or len(image_paths))
+            video_chunk_seconds = 0.0
 
         return {
             "asset_id": asset_id,
@@ -88,6 +92,7 @@ class AssetRegistry:
             "asset_type": kind,
             "updated_at": payload.get("updated_at"),
             "duration_sec": float(payload.get("duration_sec") or 0),
+            "video_chunk_seconds": video_chunk_seconds,
             "video_chunks": int(payload.get("video_chunks") or 0),
             "transcript_chunks": int(payload.get("transcript_chunks") or 0),
             "image_count": image_count,
@@ -96,10 +101,7 @@ class AssetRegistry:
         }
 
     def list_public(self) -> list[dict]:
-        return [
-            self.public_view(row["asset_id"], row)
-            for row in self.list()
-        ]
+        return [self.public_view(row["asset_id"], row) for row in self.list()]
 
     def get_public(self, asset_id: str) -> dict | None:
         payload = self.get(asset_id)

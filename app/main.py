@@ -46,6 +46,9 @@ def health():
         "weaviate_ready": weaviate_ready,
         "weaviate_error": weaviate_error,
         "video_chunk_seconds": settings.video_chunk_seconds,
+        "video_chunk_seconds_min": 1.0,
+        "video_chunk_seconds_max": 120.0,
+        "video_max_frames": settings.video_max_frames,
         "transcript_chunk_tokens": settings.transcript_chunk_tokens,
         "transcript_overlap_tokens": settings.transcript_overlap_tokens,
         "supported_modalities": ["transcript", "video", "image"],
@@ -62,10 +65,7 @@ def _public_asset(asset_id: str) -> dict:
     else:
         count = public["image_count"]
         public["media_url"] = None
-        public["preview_urls"] = [
-            f"/api/assets/{asset_id}/thumb/{i}"
-            for i in range(min(count, 24))
-        ]
+        public["preview_urls"] = [f"/api/assets/{asset_id}/thumb/{i}" for i in range(min(count, 24))]
     return public
 
 
@@ -107,6 +107,7 @@ async def ingest_path(request: PathIngestRequest):
             request.video_path,
             request.transcript_path,
             request.asset_name,
+            request.video_chunk_seconds,
         )
     )
     return {"job_id": job.id}
@@ -128,7 +129,11 @@ async def ingest_upload(
     video: UploadFile = File(...),
     transcript: UploadFile = File(...),
     asset_name: str | None = Form(default=None),
+    video_chunk_seconds: float | None = Form(default=None),
 ):
+    if video_chunk_seconds is not None and not 1.0 <= video_chunk_seconds <= 120.0:
+        raise HTTPException(400, "video_chunk_seconds must be between 1 and 120")
+
     upload_id = str(uuid4())
     upload_dir = settings.uploads_dir / upload_id
     video_path = upload_dir / Path(video.filename or "video.mp4").name
@@ -144,6 +149,7 @@ async def ingest_upload(
             str(video_path),
             str(transcript_path),
             asset_name,
+            video_chunk_seconds,
         )
     )
     return {"job_id": job.id}
