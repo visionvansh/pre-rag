@@ -11,8 +11,8 @@
     <header class="hero">
       <div>
         <p class="eyebrow">LOCAL APPLE-SILICON MULTIMODAL LAB</p>
-        <h1>Jina v5 Omni · Video, Transcript & Image Retrieval</h1>
-        <p class="sub">Adjustable video windows + recursive transcript chunks + image embeddings → one shared 1024-d Weaviate space.</p>
+        <h1>Jina v5 Omni · Video, Transcript, Image & Text Retrieval</h1>
+        <p class="sub">Adjustable video windows + recursive transcript/text chunks + image embeddings → one shared 1024-d Weaviate space.</p>
       </div>
       <div id="healthPill" class="pill neutral">Checking system…</div>
     </header>
@@ -28,6 +28,7 @@
           <select id="ingestMode">
             <option value="video">Video + transcript</option>
             <option value="images">Image collection</option>
+            <option value="texts">Text collection</option>
           </select>
         </label>
 
@@ -67,6 +68,13 @@
             <p class="note">A folder is scanned recursively for JPG, PNG, WebP, BMP, TIFF, GIF and AVIF files.</p>
           </div>
 
+          <div data-mode="texts" class="hidden">
+            <label>Text file or folder path
+              <input id="textPath" placeholder="/Volumes/vision/.../my_texts" />
+            </label>
+            <p class="note">A folder is scanned recursively for text-like files such as TXT, Markdown, JSON, YAML, CSV, HTML and common source-code files. Each file is recursively chunked independently using the Jina tokenizer.</p>
+          </div>
+
           <label>Asset label <span class="muted">optional</span>
             <input id="assetName" placeholder="My indexed asset" />
           </label>
@@ -100,6 +108,13 @@
             <p class="note">Select many images at once. Each image becomes one Jina image vector.</p>
           </div>
 
+          <div data-mode="texts" class="hidden">
+            <label>Text files
+              <input id="textFiles" type="file" accept=".txt,.md,.markdown,.rst,.log,.csv,.tsv,.json,.jsonl,.yaml,.yml,.xml,.html,.htm,.toml,.ini,.cfg,.conf,.sql,.py,.js,.jsx,.ts,.tsx,.java,.c,.cc,.cpp,.h,.hpp,.go,.rs,.sh,.bash,.zsh,text/plain,text/markdown,application/json" multiple />
+            </label>
+            <p class="note">Select many text files at once. Files are chunked separately with LangChain RecursiveCharacterTextSplitter using the existing 800-token / 120-token-overlap baseline.</p>
+          </div>
+
           <label>Asset label <span class="muted">optional</span><input id="uploadAssetName" /></label>
           <p class="note">Browser uploads are kept under this app's <code>data/uploads</code> directory so they remain usable after restart.</p>
           <button class="primary" type="submit">Upload & ingest</button>
@@ -116,10 +131,11 @@
           <h3 id="stage">Waiting for input</h3>
           <p id="detail" class="muted">The progress monitor will appear here.</p>
         </div>
-        <div class="metrics four">
+        <div class="metrics five">
           <div><span>Transcript</span><strong id="textCounter">—</strong></div>
           <div><span id="videoCounterLabel">Video</span><strong id="videoCounter">—</strong></div>
           <div><span>Images</span><strong id="imageCounter">—</strong></div>
+          <div><span>Text</span><strong id="textDocCounter">—</strong></div>
           <div><span>Weaviate</span><strong id="objectCounter">—</strong></div>
         </div>
         <pre id="errorBox" class="error hidden"></pre>
@@ -160,6 +176,20 @@
           <div id="imageGallery" class="gallery"></div>
           <div id="imageGalleryNote" class="seek-label"></div>
         </div>
+
+        <div id="textPane" class="hidden">
+          <div class="text-collection-preview">
+            <div>
+              <h3>Text files</h3>
+              <div id="textFileList" class="file-list"></div>
+            </div>
+            <div>
+              <h3>Retrieved chunk</h3>
+              <pre id="textResultPreview" class="text-result-preview">Run a search and click a text result to preview the full retrieved chunk here.</pre>
+            </div>
+          </div>
+          <div id="textPreviewNote" class="seek-label"></div>
+        </div>
       </article>
 
       <article class="card search-card">
@@ -179,6 +209,7 @@
             <label>Result modality
               <select id="modalityFilter">
                 <option value="all">All modalities</option>
+                <option value="text">Text files only</option>
                 <option value="image">Images only</option>
                 <option value="transcript">Transcript only</option>
                 <option value="video">Video only</option>
@@ -195,7 +226,7 @@
           </div>
 
           <div id="textQueryPane" class="query-row">
-            <input id="searchQuery" placeholder="e.g. a red sports car, or where is competition discussed?" autocomplete="off" />
+            <input id="searchQuery" placeholder="e.g. retrieval architecture, red sports car, or where is competition discussed?" autocomplete="off" />
             <button class="primary" type="submit">Search</button>
           </div>
 
@@ -211,7 +242,7 @@
     </section>
 
     <footer>
-      <span>Video: adjustable 1–120s windows (32 frames max/window) · Transcript: LangChain recursive 800/120 Jina tokens · Images: 1 vector/image · Jina v5 Omni MLX 1024-d</span>
+      <span>Video: adjustable 1–120s windows (32 frames max/window) · Transcript/Text: LangChain recursive 800/120 Jina tokens · Images: 1 vector/image · Jina v5 Omni MLX 1024-d</span>
     </footer>
   </main>
 <script src="/static/app.js"></script>
