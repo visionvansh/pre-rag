@@ -15,7 +15,11 @@ function fmtTime(sec=0){
   return h?`${h}:${String(m).padStart(2,'0')}:${String(r).padStart(2,'0')}`:`${m}:${String(r).padStart(2,'0')}`;
 }
 function esc(s=''){return String(s).replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]))}
-function assetIcon(a){return a.asset_type==='images'?'🖼️':'🎬'}
+function assetIcon(a){
+  if(a.asset_type==='images') return '🖼️';
+  if(a.asset_type==='texts') return '📄';
+  return '🎬';
+}
 function fmtSeconds(value){
   const n=Number(value);
   if(!Number.isFinite(n)) return '—';
@@ -46,7 +50,10 @@ function bindChunkControl(prefix){
   };
   range.addEventListener('input',()=>{input.value=range.value;out.textContent=fmtSeconds(range.value)});
   input.addEventListener('input',()=>update(input.value,false));
-  input.addEventListener('change',()=>{const v=clampChunkSeconds(input.value);input.value=String(v);range.value=String(v);out.textContent=fmtSeconds(v)});
+  input.addEventListener('change',()=>{
+    const v=clampChunkSeconds(input.value);
+    input.value=String(v);range.value=String(v);out.textContent=fmtSeconds(v);
+  });
 }
 function selectedChunkSeconds(prefix){
   return clampChunkSeconds($(`${prefix}ChunkSeconds`)?.value ?? chunkDefault);
@@ -86,6 +93,7 @@ async function startPath(e){
   e.preventDefault();
   const mode=$('ingestMode').value;
   let endpoint, body;
+
   if(mode==='video'){
     if(!$('videoPath').value.trim()||!$('transcriptPath').value.trim()) throw new Error('Video path and ASR JSON path are required.');
     const videoChunkSeconds=selectedChunkSeconds('path');
@@ -97,11 +105,16 @@ async function startPath(e){
       video_chunk_seconds:videoChunkSeconds
     };
     $('videoCounterLabel').textContent=`Video ${fmtSeconds(videoChunkSeconds)}`;
-  }else{
+  }else if(mode==='images'){
     if(!$('imagePath').value.trim()) throw new Error('Image file/folder path is required.');
     endpoint='/api/ingest/images/path';
     body={image_path:$('imagePath').value.trim(),asset_name:$('assetName').value.trim()||null};
+  }else{
+    if(!$('textPath').value.trim()) throw new Error('Text file/folder path is required.');
+    endpoint='/api/ingest/texts/path';
+    body={text_path:$('textPath').value.trim(),asset_name:$('assetName').value.trim()||null};
   }
+
   const r=await fetch(endpoint,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
   if(!r.ok)throw new Error(await r.text());
   watchJob((await r.json()).job_id);
@@ -112,6 +125,7 @@ async function startUpload(e){
   const mode=$('ingestMode').value;
   const fd=new FormData();
   let endpoint;
+
   if(mode==='video'){
     const v=$('videoFile').files[0],t=$('transcriptFile').files[0];
     if(!v||!t) throw new Error('Choose both a video and ASR JSON.');
@@ -120,12 +134,18 @@ async function startUpload(e){
     fd.append('video',v);fd.append('transcript',t);
     fd.append('video_chunk_seconds',String(videoChunkSeconds));
     $('videoCounterLabel').textContent=`Video ${fmtSeconds(videoChunkSeconds)}`;
-  }else{
+  }else if(mode==='images'){
     const imgs=[...$('imageFiles').files];
     if(!imgs.length) throw new Error('Choose at least one image.');
     endpoint='/api/ingest/images/upload';
     imgs.forEach(img=>fd.append('images',img));
+  }else{
+    const texts=[...$('textFiles').files];
+    if(!texts.length) throw new Error('Choose at least one text file.');
+    endpoint='/api/ingest/texts/upload';
+    texts.forEach(file=>fd.append('texts',file));
   }
+
   fd.append('asset_name',$('uploadAssetName').value.trim());
   const r=await fetch(endpoint,{method:'POST',body:fd});
   if(!r.ok)throw new Error(await r.text());
@@ -164,6 +184,7 @@ function renderJob(j){
   if(c.video_chunk_seconds!=null)$('videoCounterLabel').textContent=`Video ${fmtSeconds(c.video_chunk_seconds)}`;
   $('videoCounter').textContent=c.video_total!=null?`${c.video_done||0}/${c.video_total}`:'—';
   $('imageCounter').textContent=c.image_total!=null?`${c.image_done||0}/${c.image_total}`:'—';
+  $('textDocCounter').textContent=c.text_chunk_total!=null?`${c.text_chunk_done||0}/${c.text_chunk_total}`:'—';
   $('objectCounter').textContent=c.weaviate_objects!=null?c.weaviate_objects:'—';
   if(j.status==='failed'){
     $('errorBox').classList.remove('hidden');
@@ -178,15 +199,22 @@ async function loadAssets(preferId=null){
   const select=$('assetSelect');
   const previous=preferId||currentAsset;
   select.innerHTML='';
+
   const all=document.createElement('option');
   all.value='';all.textContent=`All indexed assets (${assetRows.length})`;
   select.appendChild(all);
+
   assetRows.forEach(a=>{
     const opt=document.createElement('option');
     opt.value=a.asset_id;
-    const count=a.asset_type==='images'
-      ?`${a.image_count} images`
-      :`${a.video_chunks} × ${fmtSeconds(a.video_chunk_seconds||chunkDefault)} video + ${a.transcript_chunks} text`;
+    let count;
+    if(a.asset_type==='images'){
+      count=`${a.image_count} images`;
+    }else if(a.asset_type==='texts'){
+      count=`${a.text_file_count} files · ${a.text_chunks} chunks`;
+    }else{
+      count=`${a.video_chunks} × ${fmtSeconds(a.video_chunk_seconds||chunkDefault)} video + ${a.transcript_chunks} transcript`;
+    }
     opt.textContent=`${assetIcon(a)} ${a.name} · ${count}`;
     select.appendChild(opt);
   });
@@ -195,6 +223,7 @@ async function loadAssets(preferId=null){
   if(preferId&&assetRows.some(a=>a.asset_id===preferId)) target=preferId;
   else if(previous&&assetRows.some(a=>a.asset_id===previous)) target=previous;
   else if(assetRows.length) target=assetRows[0].asset_id;
+
   select.value=target;
   $('searchSection').classList.toggle('disabled',assetRows.length===0);
   await activateAsset(target);
@@ -206,6 +235,7 @@ function setPreview(kind){
   $('emptyPreview').classList.toggle('hidden',kind!=='empty');
   $('videoPane').classList.toggle('hidden',kind!=='video');
   $('imagePane').classList.toggle('hidden',kind!=='images');
+  $('textPane').classList.toggle('hidden',kind!=='texts');
 }
 async function activateAsset(assetId){
   currentAsset=assetId||null;
@@ -240,10 +270,14 @@ async function activateAsset(assetId){
     }
     const chunkSeconds=fmtSeconds(a.video_chunk_seconds||chunkDefault);
     $('assetSummary').innerHTML=`<strong>${esc(a.name)}</strong> · video · ${a.video_chunks} visual chunks at ${chunkSeconds}/chunk · ${a.transcript_chunks} transcript chunks · ${a.weaviate_objects} Weaviate objects${a.media_available?'':' · source file unavailable'}`;
-  }else{
+  }else if(a.asset_type==='images'){
     setPreview('images');
     renderGallery(a);
     $('assetSummary').innerHTML=`<strong>${esc(a.name)}</strong> · image collection · ${a.image_count} images · ${a.weaviate_objects} Weaviate objects${a.media_available?'':' · some/all source images unavailable'}`;
+  }else{
+    setPreview('texts');
+    renderTextCollection(a);
+    $('assetSummary').innerHTML=`<strong>${esc(a.name)}</strong> · text collection · ${a.text_file_count} files · ${a.text_chunks} recursive chunks · ${a.weaviate_objects} Weaviate objects${a.media_available?'':' · source files unavailable'}`;
   }
 }
 
@@ -263,6 +297,26 @@ function renderGallery(a){
     $('imagePreview').removeAttribute('src');
   }
   $('imageGalleryNote').textContent=a.image_count>urls.length?`Showing the first ${urls.length} thumbnails of ${a.image_count}. Search can retrieve every indexed image.`:`${a.image_count} indexed images`;
+}
+
+function renderTextCollection(a){
+  const list=$('textFileList');
+  list.innerHTML='';
+  const files=a.preview_files||[];
+  if(files.length){
+    files.forEach(name=>{
+      const chip=document.createElement('span');
+      chip.className='file-chip';
+      chip.textContent=name;
+      list.appendChild(chip);
+    });
+  }else{
+    list.innerHTML='<span class="muted">No source filenames are available.</span>';
+  }
+  $('textResultPreview').textContent='Run a search and click a text result to preview the full retrieved chunk here.';
+  $('textPreviewNote').textContent=a.text_file_count>files.length
+    ?`Showing ${files.length} of ${a.text_file_count} filenames. Search covers all ${a.text_chunks} indexed text chunks.`
+    :`${a.text_file_count} files · ${a.text_chunks} indexed text chunks`;
 }
 
 $('removeAsset').addEventListener('click',async()=>{
@@ -288,6 +342,7 @@ $('searchForm').addEventListener('submit',async(e)=>{
   $('results').innerHTML='<div class="empty">Searching…</div>';
   const modality=$('modalityFilter').value;
   const limit=Number($('resultLimit').value||12);
+
   try{
     let r;
     if($('queryType').value==='text'){
@@ -319,11 +374,18 @@ $('searchForm').addEventListener('submit',async(e)=>{
 
 function renderResults(rows){
   if(!rows.length){$('results').innerHTML='<div class="empty">No matching indexed items.</div>';return}
+
   $('results').innerHTML=rows.map((r,i)=>{
-    const visual=r.thumbnail_url?`<img class="thumb" src="${r.thumbnail_url}" loading="lazy">`:`<div class="text-thumb">TRANSCRIPT</div>`;
+    const label=r.modality==='text'?'TEXT':r.modality==='transcript'?'TRANSCRIPT':'';
+    const visual=r.thumbnail_url
+      ?`<img class="thumb" src="${r.thumbnail_url}" loading="lazy">`
+      :`<div class="text-thumb">${label||esc(r.modality||'ITEM').toUpperCase()}</div>`;
     const preview=r.text||(r.modality==='image'?`Image · ${r.source_name||''}`:`Visual video segment`);
     const dist=r.distance==null?'—':Number(r.distance).toFixed(4);
-    const interval=r.modality==='image'?'':` · ${fmtTime(r.start_sec)}–${fmtTime(r.end_sec)}`;
+    const interval=(r.modality==='image'||r.modality==='text')
+      ?''
+      :` · ${fmtTime(r.start_sec)}–${fmtTime(r.end_sec)}`;
+
     return `<div class="result" data-i="${i}">
       ${visual}
       <div>
@@ -334,6 +396,7 @@ function renderResults(rows){
       <div class="distance">distance<strong>${dist}</strong></div>
     </div>`;
   }).join('');
+
   document.querySelectorAll('.result').forEach(el=>el.addEventListener('click',()=>openResult(lastResults[Number(el.dataset.i)])));
 }
 
@@ -342,12 +405,21 @@ async function openResult(r){
     await activateAsset(r.asset_id);
     $('assetSelect').value=r.asset_id;
   }
+
   if(r.modality==='image'){
     setPreview('images');
     $('imagePreview').src=r.image_url||r.thumbnail_url;
     $('imageGalleryNote').textContent=`Retrieved ${r.source_name||'image'} · distance ${Number(r.distance||0).toFixed(4)}`;
     return;
   }
+
+  if(r.modality==='text'){
+    setPreview('texts');
+    $('textResultPreview').textContent=r.text||'';
+    $('textPreviewNote').textContent=`Retrieved from ${r.source_name||'text file'} · distance ${Number(r.distance||0).toFixed(4)}`;
+    return;
+  }
+
   if(r.media_url&&currentAssetInfo?.asset_type==='video'){
     setPreview('video');
     const start=Number(r.start_sec||0);
