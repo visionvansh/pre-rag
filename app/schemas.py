@@ -15,10 +15,15 @@ class ImagePathIngestRequest(BaseModel):
     asset_name: str | None = None
 
 
+class TextPathIngestRequest(BaseModel):
+    text_path: str
+    asset_name: str | None = None
+
+
 class SearchRequest(BaseModel):
     query: str = Field(min_length=1)
     asset_id: str | None = None
-    modality: Literal["all", "video", "transcript", "image"] = "all"
+    modality: Literal["all", "video", "transcript", "image", "text"] = "all"
     limit: int = Field(default=12, ge=1, le=50)
 
 
