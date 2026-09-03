@@ -29,6 +29,16 @@ def main() -> None:
         for path in missing:
             print("MISSING:", path)
         raise SystemExit(1)
+
+    modeling = (root / "modeling.py").read_text(encoding="utf-8", errors="replace")
+    if "mm_token_type_ids=mm_token_type_ids" in modeling:
+        print(
+            "Model code: Sentence-Transformers-era Jina forward detected "
+            "(mm_token_type_ids compatibility bridge required)"
+        )
+    else:
+        print("Model code: pre-Sentence-Transformers direct compute_score path")
+
     weights = root / "model.safetensors"
     print("Weights size GB:", round(weights.stat().st_size / 1_000_000_000, 3))
     actual = sha256(weights)
