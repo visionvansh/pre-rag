@@ -108,7 +108,7 @@ class WeaviateStore:
             return_properties=[
                 "asset_id", "chunk_id", "modality", "chunk_index",
                 "start_sec", "end_sec", "text", "speaker_ids",
-                "thumbnail_relpath",
+                "thumbnail_relpath", "source_name", "frame_count",
             ],
         )
         rows = []

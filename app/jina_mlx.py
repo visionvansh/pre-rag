@@ -74,7 +74,7 @@ class JinaMLXEmbedder:
         return self.compatibility.to_dict() if self.compatibility else {}
 
     def _load_processor(self):
-        """Lazy-load Transformers/Qwen video processing only for vision paths."""
+        """Lazy-load Transformers/Qwen processing only for vision paths."""
         self.load()
         if self.processor is not None:
             return self.processor
@@ -93,7 +93,7 @@ class JinaMLXEmbedder:
                 message = str(exc)
                 if "Torchvision" in message or "torchvision" in message:
                     raise RuntimeError(
-                        "Video embedding requires torchvision. Install it inside the "
+                        "Vision embedding requires torchvision. Install it inside the "
                         "active virtual environment with: python -m pip install torchvision"
                     ) from exc
                 raise
@@ -157,6 +157,37 @@ class JinaMLXEmbedder:
                 output.append(arr.tolist())
             return output
 
+    def embed_image(self, image) -> list[float]:
+        """Embed one PIL image using Jina's official image prompt."""
+        self.load()
+        image = image.convert("RGB")
+        prompt = "<|vision_start|><|image_pad|><|vision_end|>"
+        processor = self._load_processor()
+
+        with self._infer_lock:
+            inputs = processor(images=[image], text=prompt, return_tensors="pt")
+            required = {"pixel_values", "image_grid_thw", "input_ids", "attention_mask"}
+            missing = required.difference(inputs.keys())
+            if missing:
+                raise RuntimeError(
+                    "Jina/Qwen image processor output is missing required fields: "
+                    + ", ".join(sorted(missing))
+                )
+
+            pixel_values_np = inputs["pixel_values"].detach().cpu().numpy()
+            grid_thw_np = inputs["image_grid_thw"].detach().cpu().numpy()
+            input_ids_np = inputs["input_ids"].detach().cpu().numpy()
+            attn_np = inputs["attention_mask"].detach().cpu().numpy()
+
+            emb = self.model.encode_image(
+                self.mx.array(pixel_values_np),
+                self.mx.array(grid_thw_np),
+                self.mx.array(input_ids_np),
+                self.mx.array(attn_np),
+            )
+            self.mx.eval(emb)
+            return self._to_list(emb)
+
     def embed_video_frames(self, frames) -> list[float]:
         """Embed a sequence of PIL RGB frames using Jina's official video prompt."""
         self.load()
@@ -212,6 +243,16 @@ class JinaMLXEmbedder:
                 raise
             self.mx.eval(emb)
             return self._to_list(emb)
+
+    def image_preflight(self) -> dict:
+        from PIL import Image
+
+        image = Image.new("RGB", (256, 256), (48, 88, 132))
+        vector = self.embed_image(image)
+        return {
+            "embedding_dim": len(vector),
+            "compatibility": self.compatibility_report(),
+        }
 
     def video_preflight(self) -> dict:
         """Run a tiny synthetic 4-frame video through processor + MLX vision tower."""

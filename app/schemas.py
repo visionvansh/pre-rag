@@ -1,4 +1,5 @@
 from typing import Literal
+
 from pydantic import BaseModel, Field
 
 
@@ -8,10 +9,15 @@ class PathIngestRequest(BaseModel):
     asset_name: str | None = None
 
 
+class ImagePathIngestRequest(BaseModel):
+    image_path: str
+    asset_name: str | None = None
+
+
 class SearchRequest(BaseModel):
     query: str = Field(min_length=1)
     asset_id: str | None = None
-    modality: Literal["all", "video", "transcript"] = "all"
+    modality: Literal["all", "video", "transcript", "image"] = "all"
     limit: int = Field(default=12, ge=1, le=50)
 
 
@@ -26,3 +32,4 @@ class SearchResult(BaseModel):
     text: str | None = None
     speaker_ids: list[int] = []
     thumbnail_url: str | None = None
+    image_url: str | None = None

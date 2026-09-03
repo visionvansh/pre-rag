@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import math
 import traceback
+from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
 
@@ -174,12 +175,15 @@ def _run_ingestion(job_id: str, video_path: str, transcript_path: str, asset_nam
             asset_id,
             {
                 "name": asset_name or video.stem,
+                "asset_type": "video",
                 "video_path": str(video),
                 "transcript_path": str(transcript),
                 "duration_sec": duration,
                 "video_chunks": video_done,
                 "transcript_chunks": len(text_chunks),
+                "image_count": 0,
                 "weaviate_objects": total_objects,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
             },
         )
         jobs.update(
@@ -206,19 +210,19 @@ def _run_ingestion(job_id: str, video_path: str, transcript_path: str, asset_nam
         )
 
 
-_INGEST_LOCK = Lock()
+INGEST_LOCK = Lock()
 
 
 def run_ingestion(job_id: str, video_path: str, transcript_path: str, asset_name: str | None = None):
-    if not _INGEST_LOCK.acquire(blocking=False):
+    if not INGEST_LOCK.acquire(blocking=False):
         jobs.update(
             job_id,
             status="queued",
             stage="Waiting for ingestion slot",
             detail="Another local MLX ingestion job is active; this job will start next.",
         )
-        _INGEST_LOCK.acquire()
+        INGEST_LOCK.acquire()
     try:
         return _run_ingestion(job_id, video_path, transcript_path, asset_name)
     finally:
-        _INGEST_LOCK.release()
+        INGEST_LOCK.release()
