@@ -3,16 +3,16 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Jina v5 Omni Video RAG Lab</title>
+  <title>Jina v5 Omni Multimodal RAG Lab</title>
   <link rel="stylesheet" href="/static/styles.css" />
 </head>
 <body>
   <main class="shell">
     <header class="hero">
       <div>
-        <p class="eyebrow">LOCAL APPLE-SILICON LAB</p>
-        <h1>Jina v5 Omni · Video + Transcript Retrieval</h1>
-        <p class="sub">10-second video embeddings + recursive timestamped transcript embeddings → one Weaviate vector space.</p>
+        <p class="eyebrow">LOCAL APPLE-SILICON MULTIMODAL LAB</p>
+        <h1>Jina v5 Omni · Video, Transcript & Image Retrieval</h1>
+        <p class="sub">Fixed 10-second video chunks + recursive transcript chunks + image embeddings → one shared 1024-d Weaviate space.</p>
       </div>
       <div id="healthPill" class="pill neutral">Checking system…</div>
     </header>
@@ -20,33 +20,60 @@
     <section class="grid two">
       <article class="card">
         <div class="card-head">
-          <div><span class="step">01</span><h2>Inputs</h2></div>
-          <span class="muted">Local-path mode is best for large videos.</span>
+          <div><span class="step">01</span><h2>Ingest</h2></div>
+          <span class="muted">Choose a workflow, then use local paths or browser upload.</span>
         </div>
 
+        <label class="mode-label">Ingestion workflow
+          <select id="ingestMode">
+            <option value="video">Video + transcript</option>
+            <option value="images">Image collection</option>
+          </select>
+        </label>
+
         <div class="tabs">
-          <button id="pathTab" class="tab active">Mac paths</button>
-          <button id="uploadTab" class="tab">Browser upload</button>
+          <button id="pathTab" class="tab active" type="button">Mac paths</button>
+          <button id="uploadTab" class="tab" type="button">Browser upload</button>
         </div>
 
         <form id="pathForm" class="form-pane active">
-          <label>Video path
-            <input id="videoPath" placeholder="/Volumes/vision/.../video.mp4" required />
-          </label>
-          <label>ASR JSON path
-            <input id="transcriptPath" placeholder="/Volumes/vision/.../transcript.json" required />
-          </label>
+          <div data-mode="video">
+            <label>Video path
+              <input id="videoPath" placeholder="/Volumes/vision/.../video.mp4" />
+            </label>
+            <label>ASR JSON path
+              <input id="transcriptPath" placeholder="/Volumes/vision/.../transcript.json" />
+            </label>
+          </div>
+
+          <div data-mode="images" class="hidden">
+            <label>Image file or folder path
+              <input id="imagePath" placeholder="/Volumes/vision/.../my_images" />
+            </label>
+            <p class="note">A folder is scanned recursively for JPG, PNG, WebP, BMP, TIFF, GIF and AVIF files.</p>
+          </div>
+
           <label>Asset label <span class="muted">optional</span>
-            <input id="assetName" placeholder="My test video" />
+            <input id="assetName" placeholder="My indexed asset" />
           </label>
           <button class="primary" type="submit">Start ingestion</button>
         </form>
 
         <form id="uploadForm" class="form-pane">
-          <label>Video file<input id="videoFile" type="file" accept="video/*" required /></label>
-          <label>ASR JSON<input id="transcriptFile" type="file" accept="application/json,.json,.txt" required /></label>
+          <div data-mode="video">
+            <label>Video file<input id="videoFile" type="file" accept="video/*" /></label>
+            <label>ASR JSON<input id="transcriptFile" type="file" accept="application/json,.json,.txt" /></label>
+          </div>
+
+          <div data-mode="images" class="hidden">
+            <label>Image files
+              <input id="imageFiles" type="file" accept="image/*,.avif" multiple />
+            </label>
+            <p class="note">Select many images at once. Each image becomes one Jina image vector.</p>
+          </div>
+
           <label>Asset label <span class="muted">optional</span><input id="uploadAssetName" /></label>
-          <p class="note">Uploads copy the video into the app data folder. For large files on your Mac, use path mode instead.</p>
+          <p class="note">Browser uploads are kept under this app's <code>data/uploads</code> directory so they remain usable after restart.</p>
           <button class="primary" type="submit">Upload & ingest</button>
         </form>
       </article>
@@ -61,39 +88,102 @@
           <h3 id="stage">Waiting for input</h3>
           <p id="detail" class="muted">The progress monitor will appear here.</p>
         </div>
-        <div class="metrics">
+        <div class="metrics four">
           <div><span>Transcript</span><strong id="textCounter">—</strong></div>
           <div><span>Video 10s</span><strong id="videoCounter">—</strong></div>
+          <div><span>Images</span><strong id="imageCounter">—</strong></div>
           <div><span>Weaviate</span><strong id="objectCounter">—</strong></div>
         </div>
         <pre id="errorBox" class="error hidden"></pre>
       </article>
     </section>
 
+    <section class="card library-card">
+      <div class="card-head">
+        <div><span class="step">03</span><h2>Indexed asset library</h2></div>
+        <span class="muted">Persists across app restarts.</span>
+      </div>
+      <div class="library-row">
+        <select id="assetSelect"></select>
+        <button id="refreshAssets" class="secondary" type="button">Refresh</button>
+        <button id="removeAsset" class="danger" type="button" disabled>Remove index</button>
+      </div>
+      <div id="assetSummary" class="asset-summary">Loading indexed assets…</div>
+    </section>
+
     <section id="searchSection" class="grid search-grid disabled">
       <article class="card player-card">
-        <div class="card-head"><div><span class="step">03</span><h2>Source video</h2></div><span id="assetLabel" class="muted">No indexed asset</span></div>
-        <video id="videoPlayer" controls preload="metadata"></video>
-        <div id="seekLabel" class="seek-label">Select a search result to jump to its timestamp.</div>
+        <div class="card-head">
+          <div><span class="step">04</span><h2>Asset preview</h2></div>
+          <span id="assetLabel" class="muted">No indexed asset</span>
+        </div>
+
+        <div id="emptyPreview" class="empty preview-empty">Select an indexed asset from the library.</div>
+
+        <div id="videoPane" class="hidden">
+          <video id="videoPlayer" controls preload="metadata"></video>
+          <div id="seekLabel" class="seek-label">Select a search result to jump to its timestamp.</div>
+        </div>
+
+        <div id="imagePane" class="hidden">
+          <div class="image-viewer">
+            <img id="imagePreview" alt="Selected image result" />
+          </div>
+          <div id="imageGallery" class="gallery"></div>
+          <div id="imageGalleryNote" class="seek-label"></div>
+        </div>
       </article>
 
       <article class="card search-card">
-        <div class="card-head"><div><span class="step">04</span><h2>Semantic search</h2></div><span class="muted">Jina query → shared Weaviate index</span></div>
-        <form id="searchForm" class="search-row">
-          <input id="searchQuery" placeholder="e.g. where does he discuss competition?" autocomplete="off" />
-          <select id="modalityFilter">
-            <option value="all">All modalities</option>
-            <option value="transcript">Transcript only</option>
-            <option value="video">Video only</option>
-          </select>
-          <button class="primary" type="submit">Search</button>
+        <div class="card-head">
+          <div><span class="step">05</span><h2>Semantic retrieval</h2></div>
+          <span class="muted">Text or image query → shared Jina space</span>
+        </div>
+
+        <form id="searchForm" class="search-form">
+          <div class="query-grid">
+            <label>Query type
+              <select id="queryType">
+                <option value="text">Text query</option>
+                <option value="image">Image query</option>
+              </select>
+            </label>
+            <label>Result modality
+              <select id="modalityFilter">
+                <option value="all">All modalities</option>
+                <option value="image">Images only</option>
+                <option value="transcript">Transcript only</option>
+                <option value="video">Video only</option>
+              </select>
+            </label>
+            <label>Results
+              <select id="resultLimit">
+                <option value="8">8</option>
+                <option value="12" selected>12</option>
+                <option value="24">24</option>
+                <option value="40">40</option>
+              </select>
+            </label>
+          </div>
+
+          <div id="textQueryPane" class="query-row">
+            <input id="searchQuery" placeholder="e.g. a red sports car, or where is competition discussed?" autocomplete="off" />
+            <button class="primary" type="submit">Search</button>
+          </div>
+
+          <div id="imageQueryPane" class="query-row hidden">
+            <input id="queryImage" type="file" accept="image/*,.avif" />
+            <button class="primary" type="submit">Search by image</button>
+          </div>
         </form>
-        <div id="results" class="results"><div class="empty">Index a video, then search it here.</div></div>
+
+        <div class="search-scope">Scope: <strong id="scopeLabel">—</strong></div>
+        <div id="results" class="results"><div class="empty">Choose an indexed asset, then search it here.</div></div>
       </article>
     </section>
 
     <footer>
-      <span>Video chunks: fixed 10s · Transcript: LangChain recursive splitter · Embeddings: Jina v5 Omni MLX 1024-d</span>
+      <span>Video: fixed 10s · Transcript: LangChain recursive 800/120 Jina tokens · Images: 1 vector/image · Jina v5 Omni MLX 1024-d</span>
     </footer>
   </main>
 <script src="/static/app.js"></script>
