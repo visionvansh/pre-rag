@@ -10,6 +10,9 @@ from .config import settings
 from .jina_compat import JinaCompatibilityReport, load_jina_model_module
 
 
+MODEL_CONTEXT_TOKENS = 32768
+
+
 class JinaMLXEmbedder:
     """Lazy, single-process wrapper around the official Jina MLX checkpoint."""
 
@@ -89,6 +92,17 @@ class JinaMLXEmbedder:
                     trust_remote_code=True,
                     local_files_only=True,
                 )
+
+                # Some Transformers/processor combinations can inherit an unexpectedly
+                # small tokenizer limit (commonly 512), which truncates the expanded
+                # <|image_pad|>/<|video_pad|> sequence before Jina sees it. Jina v5 Omni
+                # supports a 32,768-token sequence, so never leave the processor tokenizer
+                # configured below that value.
+                processor_tokenizer = getattr(self.processor, "tokenizer", None)
+                if processor_tokenizer is not None:
+                    current_limit = getattr(processor_tokenizer, "model_max_length", None)
+                    if isinstance(current_limit, (int, float)) and current_limit < MODEL_CONTEXT_TOKENS:
+                        processor_tokenizer.model_max_length = MODEL_CONTEXT_TOKENS
             except ImportError as exc:
                 message = str(exc)
                 if "Torchvision" in message or "torchvision" in message:
@@ -98,6 +112,29 @@ class JinaMLXEmbedder:
                     ) from exc
                 raise
         return self.processor
+
+    @staticmethod
+    def _vision_processor_kwargs() -> dict:
+        """Prevent HF token truncation while respecting Jina's true 32K context ceiling."""
+        return {
+            "return_tensors": "pt",
+            "truncation": False,
+            "max_length": MODEL_CONTEXT_TOKENS,
+        }
+
+    @staticmethod
+    def _validate_processed_sequence(inputs, modality: str) -> int:
+        input_ids = inputs.get("input_ids")
+        if input_ids is None:
+            raise RuntimeError(f"{modality} processor output is missing input_ids")
+        seq_len = int(input_ids.shape[-1])
+        if seq_len > MODEL_CONTEXT_TOKENS:
+            raise RuntimeError(
+                f"Processed {modality} input requires {seq_len} sequence tokens, which exceeds "
+                f"Jina v5 Omni's {MODEL_CONTEXT_TOKENS}-token context. Reduce the visual input "
+                "size/complexity rather than truncating multimodal placeholder tokens."
+            )
+        return seq_len
 
     def token_length(self, text: str) -> int:
         self.load()
@@ -165,7 +202,23 @@ class JinaMLXEmbedder:
         processor = self._load_processor()
 
         with self._infer_lock:
-            inputs = processor(images=[image], text=prompt, return_tensors="pt")
+            try:
+                inputs = processor(
+                    images=[image],
+                    text=prompt,
+                    **self._vision_processor_kwargs(),
+                )
+            except ValueError as exc:
+                message = str(exc)
+                if "Mismatch in `image` token count" in message:
+                    raise RuntimeError(
+                        "Transformers truncated Jina's expanded image placeholder sequence. "
+                        "The app requested truncation=False and a 32768-token ceiling, but the "
+                        "installed processor still truncated it. Check the installed Transformers "
+                        "version and rerun scripts/check_processor_truncation.py."
+                    ) from exc
+                raise
+
             required = {"pixel_values", "image_grid_thw", "input_ids", "attention_mask"}
             missing = required.difference(inputs.keys())
             if missing:
@@ -174,6 +227,7 @@ class JinaMLXEmbedder:
                     + ", ".join(sorted(missing))
                 )
 
+            self._validate_processed_sequence(inputs, "image")
             pixel_values_np = inputs["pixel_values"].detach().cpu().numpy()
             grid_thw_np = inputs["image_grid_thw"].detach().cpu().numpy()
             input_ids_np = inputs["input_ids"].detach().cpu().numpy()
@@ -206,7 +260,22 @@ class JinaMLXEmbedder:
         processor = self._load_processor()
 
         with self._infer_lock:
-            inputs = processor(text=prompt, videos=frames, return_tensors="pt")
+            try:
+                inputs = processor(
+                    text=prompt,
+                    videos=frames,
+                    **self._vision_processor_kwargs(),
+                )
+            except ValueError as exc:
+                message = str(exc)
+                if "Mismatch in `video` token count" in message:
+                    raise RuntimeError(
+                        "Transformers truncated Jina's expanded video placeholder sequence. "
+                        "The app requested truncation=False and a 32768-token ceiling. Reduce "
+                        "the visual window/complexity or check the installed Transformers version."
+                    ) from exc
+                raise
+
             required = {"pixel_values_videos", "video_grid_thw", "input_ids", "attention_mask"}
             missing = required.difference(inputs.keys())
             if missing:
@@ -215,6 +284,7 @@ class JinaMLXEmbedder:
                     + ", ".join(sorted(missing))
                 )
 
+            self._validate_processed_sequence(inputs, "video")
             pixel_values_np = inputs["pixel_values_videos"].detach().cpu().numpy()
             grid_thw_np = inputs["video_grid_thw"].detach().cpu().numpy()
             input_ids_np = inputs["input_ids"].detach().cpu().numpy()
@@ -245,12 +315,15 @@ class JinaMLXEmbedder:
             return self._to_list(emb)
 
     def image_preflight(self) -> dict:
+        """Stress the image path with >512 visual tokens to catch processor truncation."""
         from PIL import Image
 
-        image = Image.new("RGB", (256, 256), (48, 88, 132))
+        image = Image.new("RGB", (1024, 1024), (48, 88, 132))
         vector = self.embed_image(image)
         return {
             "embedding_dim": len(vector),
+            "test_image_size": [1024, 1024],
+            "processor_context_limit": MODEL_CONTEXT_TOKENS,
             "compatibility": self.compatibility_report(),
         }
 
