@@ -37,7 +37,12 @@ class JinaM0Reranker:
         path = Path(settings.reranker_python_path).expanduser()
         if not path.is_absolute():
             path = PROJECT_ROOT / path
-        return path.resolve()
+        # IMPORTANT: do not call Path.resolve() here. A venv's bin/python is
+        # normally a symlink to the base interpreter. Resolving that symlink and
+        # executing its target bypasses pyvenv.cfg/site-packages, which would run
+        # m0 under the main/global Transformers installation instead of the
+        # dedicated 4.48.3 compatibility environment.
+        return path.absolute()
 
     @property
     def loaded(self) -> bool:
@@ -66,7 +71,7 @@ class JinaM0Reranker:
             return
         raise FileNotFoundError(
             f"Dedicated reranker Python not found: {self.worker_python}\n"
-            "Create it with: ./scripts/setup_reranker_env.sh\n"
+            "Create it with: zsh scripts/setup_reranker_env.sh\n"
             "Do not downgrade Transformers in the main .venv; Jina-v5 Omni needs the newer stack."
         )
 
