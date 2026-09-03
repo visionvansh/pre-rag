@@ -1,68 +1,57 @@
-# pre-rag — Jina v5 Omni MLX multimodal retrieval lab
+# pre-rag — local multimodal retrieval + m0 reranking
 
-Local Apple-Silicon application for indexing and searching:
+Apple-Silicon application for indexing and searching:
 
-- **Video + existing ASR transcript**
-- **Image collections**
+- video + existing ASR transcript
+- image collections
+- text collections
 
-with `jina-embeddings-v5-omni-small-retrieval-mlx` and a local Weaviate container.
+Stage 1 uses `jina-embeddings-v5-omni-small-retrieval-mlx` with a self-provided 1024-d Weaviate vector index. Stage 2 optionally uses `jina-reranker-m0` to rerank a wider candidate pool.
 
-## Current ingestion design
+## Ranking policy
+
+The ranking policy is intentionally strict:
+
+```text
+query
+  ↓
+Jina v5 Omni embedding
+  ↓
+Weaviate candidate retrieval
+  ↓
+jina-reranker-m0 relevance score
+  ↓
+final order
+```
+
+Vector distance is **not blended** with the m0 relevance score. The webpage shows both result lists so dense and reranked behavior can be compared directly.
+
+See [`docs/RERANKER.md`](docs/RERANKER.md) for model download, configuration and reranker design.
+
+## Ingestion
 
 ### Video + transcript
-- Video chunks: **fixed 10 seconds**, no overlap.
-- Up to **32 sampled frames** per 10-second video chunk.
-- Transcript: LangChain `RecursiveCharacterTextSplitter`.
-- Transcript length function: the **local Jina tokenizer**.
-- Baseline transcript size: **800 Jina tokens**, **120-token overlap**.
-- Existing word timestamps / `utterances[].word_range` are preserved for retrieval timestamps.
+- Adjustable video windows: 1–120 seconds, no overlap.
+- Up to 32 sampled frames/window.
+- New ingestions create a 4-scene contact sheet/window for visual reranking.
+- Transcript chunks use LangChain `RecursiveCharacterTextSplitter`, actual local Jina token counts, 800-token baseline and 120-token overlap.
+- Existing ASR word timestamps remain the source of retrieval timestamps.
 
 ### Images
-- One Jina embedding per image.
-- Browser upload accepts many images at once.
-- Mac-path mode accepts either one image or a directory; directories are scanned recursively.
-- Generated thumbnails are stored under `data/assets/<asset_id>/thumbs`.
+- One Jina vector/image.
+- Mac-path mode accepts one file or recursive directory.
+- Browser upload accepts multiple images.
 
-### Shared search space
-All video, transcript and image embeddings are 1024-d Jina retrieval vectors stored in the same self-provided Weaviate vector space.
-
-That enables:
-- text → transcript
-- text → video
-- text → image
-- image → image
-- image → video/transcript
-- global retrieval across every indexed asset
+### Text
+- One file or recursive directory in Mac-path mode; multiple browser uploads are supported.
+- Files are chunked independently with the same Jina-token recursive baseline.
+- Indexed as `modality="text"`.
 
 ## Persistent asset library
 
-The webpage now loads `data/assets.json` on startup and shows previously indexed assets in the **Indexed asset library** dropdown.
+`data/assets.json` persists videos, images and text collections across app restarts. Existing vectors remain searchable even when an original source file later moves; source playback/full preview may then be unavailable.
 
-This fixes the old behavior where an asset could only become active immediately after a fresh ingestion job.
-
-Selecting an existing asset enables search immediately. Selecting **All indexed assets** performs global retrieval.
-
-The UI also supports:
-- refresh asset list
-- remove an asset from Weaviate without deleting original source files
-- video timestamp seeking from retrieved video/transcript results
-- image preview/gallery from retrieved image results
-- text-query or image-query mode
-- modality filter and result-count selector
-
-## Jina MLX compatibility fix
-
-`app/jina_compat.py` preserves the earlier MLX scalar/int compatibility patch for the current vision tower:
-
-```python
-mx.repeat(seq_len_i, int(grid_thw[i, 0].item()))
-```
-
-The downloaded Hugging Face checkpoint is not changed on disk.
-
-## Install / update
-
-From your repo:
+## Update/install
 
 ```bash
 cd "/Volumes/vision/Downloads/codes_necessary/pre-rag"
@@ -81,41 +70,20 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Default Jina model path:
-
-```text
-/Volumes/vision/Downloads/codes_necessary/models/jina-embeddings-v5-omni-small-retrieval-mlx
-```
-
 ## Health checks
-
-Weaviate:
 
 ```bash
 python scripts/check_weaviate.py
-```
-
-Text:
-
-```bash
 python scripts/check_model.py
-```
-
-Image vision path:
-
-```bash
 python scripts/check_image_model.py
-```
-
-Video vision path:
-
-```bash
 python scripts/check_video_model.py
+python scripts/check_reranker_files.py
+python scripts/check_reranker.py
 ```
 
-Run all four before a large ingestion when changing MLX / Transformers versions.
+The first four validate Weaviate/Jina-v5. The last two validate the local m0 files and actual text/vision reranking path.
 
-## Start the app
+## Start
 
 ```bash
 ./run.sh
@@ -127,71 +95,33 @@ Open:
 http://127.0.0.1:8000
 ```
 
-## Image ingestion
+## Search comparison
 
-Choose **Image collection** from the ingestion workflow dropdown.
+The search UI provides:
 
-### Mac paths
-Provide:
-- one image path, or
-- a directory containing images.
+- query type: text or image
+- result modality: all / text / image / transcript / video
+- final result count
+- m0 candidate-pool size up to 200
+- reranker on/off comparison
 
-Supported by this app's PIL ingestion layer:
+Every search displays:
 
-```text
-.jpg .jpeg .png .webp .bmp .tif .tiff .gif .avif
-```
+1. **Semantic vector** — unchanged dense baseline from Jina-v5 + Weaviate.
+2. **m0 reranker** — final ranking by `rerank_score` only.
 
-### Browser upload
-Select multiple images in the file picker and click **Upload & ingest**.
-
-Each image is indexed as:
-
-```text
-modality = image
-chunk_id = image_00000 ...
-embedding_dim = 1024
-```
-
-## Searching
-
-The asset library dropdown controls search scope.
-
-- Select one asset to restrict retrieval to it.
-- Select **All indexed assets** for global retrieval.
-
-Then choose:
-
-```text
-Query type:
-- Text query
-- Image query
-
-Result modality:
-- All
-- Images
-- Transcript
-- Video
-```
-
-Image query mode sends the query image through Jina `encode_image()` and performs vector search in exactly the same Weaviate space.
-
-## Existing assets
-
-`git pull` does not remove your ignored `data/` folder, so existing registry entries, uploaded media and generated thumbnails remain in place.
-
-If an original local-path video/image has moved, its vectors remain searchable. Playback/full-image viewing may be unavailable until the source is restored to the recorded path.
+Reranked cards retain `vector_distance`, candidate dense rank, `rerank_score` and final rank for debugging.
 
 ## Weaviate
 
-The application generates all embeddings locally. Weaviate does no vectorization.
-
-Expected local ports:
+The application computes all embeddings locally; Weaviate does no vectorization.
 
 ```text
 REST  127.0.0.1:8080
 gRPC  127.0.0.1:50051
 ```
+
+No Weaviate schema migration is required for the reranker.
 
 ## Tests
 

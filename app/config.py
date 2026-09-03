@@ -9,6 +9,9 @@ class Settings(BaseSettings):
         "/Volumes/vision/Downloads/codes_necessary/models/"
         "jina-embeddings-v5-omni-small-retrieval-mlx"
     )
+    jina_reranker_path: Path = Path(
+        "/Volumes/vision/Downloads/codes_necessary/models/jina-reranker-m0"
+    )
 
     weaviate_host: str = "127.0.0.1"
     weaviate_http_port: int = 8080
@@ -21,6 +24,18 @@ class Settings(BaseSettings):
     transcript_chunk_tokens: int = 800
     transcript_overlap_tokens: int = 120
     search_limit: int = 12
+
+    # Stage-two reranking. Dense retrieval remains the candidate generator only.
+    reranker_enabled: bool = True
+    reranker_device: str = "auto"  # auto -> MPS on Apple Silicon when available
+    reranker_candidate_limit: int = 64
+    reranker_max_candidates: int = 200
+    reranker_text_batch_size: int = 4
+    reranker_image_batch_size: int = 1
+    reranker_text_max_length: int = 3072
+    reranker_image_max_length: int = 4096
+    reranker_query_max_length: int = 512
+    reranker_attn_implementation: str = "eager"
 
     @property
     def uploads_dir(self) -> Path:

@@ -25,6 +25,8 @@ class SearchRequest(BaseModel):
     asset_id: str | None = None
     modality: Literal["all", "video", "transcript", "image", "text"] = "all"
     limit: int = Field(default=12, ge=1, le=50)
+    candidate_limit: int | None = Field(default=None, ge=1, le=200)
+    rerank: bool = True
 
 
 class SearchResult(BaseModel):
@@ -35,6 +37,9 @@ class SearchResult(BaseModel):
     start_sec: float
     end_sec: float
     distance: float | None = None
+    dense_rank: int | None = None
+    rerank_score: float | None = None
+    rerank_rank: int | None = None
     text: str | None = None
     speaker_ids: list[int] = []
     thumbnail_url: str | None = None

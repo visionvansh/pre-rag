@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
 
+from PIL import Image, ImageOps
+
 from .asr_parser import load_asr, recursive_chunks
 from .config import settings
 from .jina_mlx import embedder
@@ -58,6 +60,36 @@ def _set(job_id: str, pct: float, stage: str, detail: str, **counters):
     )
 
 
+def _contact_sheet_frames(frames: list[Image.Image]) -> list[Image.Image]:
+    if not frames:
+        return []
+    if len(frames) <= 4:
+        selected = list(frames)
+    else:
+        last = len(frames) - 1
+        indices = [0, round(last / 3), round(2 * last / 3), last]
+        selected = [frames[index] for index in indices]
+    while len(selected) < 4:
+        selected.append(selected[-1])
+    return selected[:4]
+
+
+def _save_rerank_contact_sheet(frames: list[Image.Image], destination: Path) -> None:
+    """Save a 2x2 visual summary used only by the stage-two m0 reranker."""
+    selected = _contact_sheet_frames(frames)
+    if not selected:
+        return
+    cell_w, cell_h = 448, 252
+    sheet = Image.new("RGB", (cell_w * 2, cell_h * 2), (8, 10, 14))
+    for index, frame in enumerate(selected):
+        prepared = ImageOps.contain(frame.convert("RGB"), (cell_w, cell_h))
+        x = (index % 2) * cell_w + (cell_w - prepared.width) // 2
+        y = (index // 2) * cell_h + (cell_h - prepared.height) // 2
+        sheet.paste(prepared, (x, y))
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    sheet.save(destination, format="JPEG", quality=86, optimize=True)
+
+
 def _run_ingestion(
     job_id: str,
     video_path: str,
@@ -94,8 +126,7 @@ def _run_ingestion(
         _set(job_id, 9, "Video preflight", "Testing Jina video processor and MLX vision tower")
         embedder.video_preflight()
 
-        # Re-ingesting the same source with a different window intentionally replaces
-        # the previous vectors for that asset instead of mixing incompatible chunk grids.
+        # Re-ingesting the same source replaces its prior vector grid.
         store.delete_asset(asset_id)
 
         _set(job_id, 12, "Chunk transcript", "Recursive LangChain chunking with the Jina tokenizer")
@@ -167,7 +198,9 @@ def _run_ingestion(
 
         asset_dir = settings.assets_dir / asset_id
         thumbs_dir = asset_dir / "thumbs"
+        rerank_dir = asset_dir / "rerank"
         thumbs_dir.mkdir(parents=True, exist_ok=True)
+        rerank_dir.mkdir(parents=True, exist_ok=True)
 
         video_done = 0
         for chunk in iter_video_chunks(
@@ -179,6 +212,13 @@ def _run_ingestion(
             thumb_name = f"{chunk.chunk_index:05d}.jpg"
             thumb_path = thumbs_dir / thumb_name
             chunk.frames[len(chunk.frames) // 2].save(thumb_path, format="JPEG", quality=82)
+
+            # m0 has no native video doc_type. A four-scene contact sheet gives the
+            # visual reranker a better representation than the midpoint thumbnail.
+            _save_rerank_contact_sheet(
+                chunk.frames,
+                rerank_dir / f"{chunk.chunk_index:05d}.jpg",
+            )
 
             chunk_id = f"video_{chunk.chunk_index:05d}"
             store.insert(
@@ -225,6 +265,7 @@ def _run_ingestion(
                 "video_chunks": video_done,
                 "transcript_chunks": len(text_chunks),
                 "image_count": 0,
+                "rerank_previews": video_done,
                 "weaviate_objects": total_objects,
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             },

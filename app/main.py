@@ -14,7 +14,7 @@ from PIL import Image, ImageOps
 from .config import settings
 from .image_ingestion import discover_image_paths, run_image_ingestion
 from .ingestion import run_ingestion
-from .jina_mlx import embedder
+from .jina_reranker import reranker
 from .job_store import jobs
 from .registry import registry
 from .schemas import (
@@ -23,6 +23,7 @@ from .schemas import (
     SearchRequest,
     TextPathIngestRequest,
 )
+from .search_service import search_image, search_text
 from .text_ingestion import discover_text_paths, run_text_ingestion
 from .weaviate_store import store
 
@@ -51,6 +52,7 @@ def health():
         "model_exists": settings.jina_model_path.exists(),
         "weaviate_ready": weaviate_ready,
         "weaviate_error": weaviate_error,
+        "reranker": reranker.status(),
         "video_chunk_seconds": settings.video_chunk_seconds,
         "video_chunk_seconds_min": 1.0,
         "video_chunk_seconds_max": 120.0,
@@ -241,7 +243,6 @@ async def ingest_texts_upload(
     upload_id = str(uuid4())
     upload_dir = settings.uploads_dir / upload_id / "texts"
     paths: list[Path] = []
-
     for index, upload in enumerate(texts):
         safe_name = Path(upload.filename or f"text_{index:05d}.txt").name
         destination = upload_dir / f"{index:05d}_{safe_name}"
@@ -268,54 +269,16 @@ def get_job(job_id: str):
     return job
 
 
-def _decorate_results(rows: list[dict]) -> list[dict]:
-    for row in rows:
-        asset_id = row.get("asset_id")
-        payload = registry.get(asset_id) if asset_id else None
-        public = registry.get_public(asset_id) if asset_id else None
-        row["asset_name"] = (public or {}).get("name") or asset_id
-        modality = row.get("modality")
-
-        if modality in {"video", "image"} and asset_id:
-            idx = int(row.get("chunk_index", 0))
-            row["thumbnail_url"] = f"/api/assets/{asset_id}/thumb/{idx}"
-        else:
-            row["thumbnail_url"] = None
-
-        if modality == "image" and asset_id:
-            row["image_url"] = (
-                f"/api/assets/{asset_id}/image/{int(row.get('chunk_index', 0))}"
-            )
-        else:
-            row["image_url"] = None
-
-        if (
-            payload
-            and registry.asset_type(payload) == "video"
-            and public
-            and public["media_available"]
-        ):
-            row["media_url"] = f"/api/assets/{asset_id}/media"
-        else:
-            row["media_url"] = None
-
-    return rows
-
-
 @app.post("/api/search")
 def search(request: SearchRequest):
-    query_vector = embedder.embed_query(request.query)
-    rows = store.search(
-        query_vector,
-        request.asset_id,
-        request.modality,
-        request.limit,
+    return search_text(
+        request.query,
+        asset_id=request.asset_id,
+        modality=request.modality,
+        final_limit=request.limit,
+        candidate_limit=request.candidate_limit,
+        run_reranker=request.rerank,
     )
-    return {
-        "query": request.query,
-        "query_type": "text",
-        "results": _decorate_results(rows),
-    }
 
 
 @app.post("/api/search/image")
@@ -324,11 +287,15 @@ async def search_by_image(
     asset_id: str | None = Form(default=None),
     modality: str = Form(default="all"),
     limit: int = Form(default=12),
+    candidate_limit: int | None = Form(default=None),
+    rerank: bool = Form(default=True),
 ):
     if modality not in {"all", "video", "transcript", "image", "text"}:
         raise HTTPException(400, "Invalid modality filter")
-
     limit = max(1, min(50, int(limit)))
+    if candidate_limit is not None:
+        candidate_limit = max(1, min(200, int(candidate_limit)))
+
     data = await query_image.read()
     await query_image.close()
     if not data:
@@ -340,13 +307,16 @@ async def search_by_image(
     except Exception as exc:
         raise HTTPException(400, f"Could not decode query image: {exc}") from exc
 
-    query_vector = embedder.embed_image(image)
-    rows = store.search(query_vector, asset_id or None, modality, limit)
-    return {
-        "query": query_image.filename or "query image",
-        "query_type": "image",
-        "results": _decorate_results(rows),
-    }
+    return await asyncio.to_thread(
+        search_image,
+        image,
+        query_label=query_image.filename or "query image",
+        asset_id=asset_id or None,
+        modality=modality,
+        final_limit=limit,
+        candidate_limit=candidate_limit,
+        run_reranker=rerank,
+    )
 
 
 @app.get("/api/assets/{asset_id}/media")
