@@ -1,0 +1,8 @@
+# Isolated compatibility environment for jinaai/jina-reranker-m0.
+# Do NOT merge this pin into requirements.txt: the main Jina-v5 Omni app needs
+# the newer Transformers/Qwen3-VL stack.
+transformers==4.48.3
+torch>=2.5
+torchvision
+pillow>=11.0
+safetensors>=0.4
