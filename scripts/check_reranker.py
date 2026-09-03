@@ -12,23 +12,38 @@ from app.jina_reranker import reranker
 
 def main() -> None:
     print(f"Project root: {PROJECT_ROOT}")
-    print(f"Python: {sys.executable}")
+    print(f"Main app Python: {sys.executable}")
     print(f"Architecture: {platform.machine()}")
-    print("Reranker status before load:", reranker.status())
+    print("Reranker status before worker start:", reranker.status())
     try:
         result = reranker.preflight()
-        print("\nReranker status after load:", result["status"])
+        status = result["status"]
+        print("\nReranker worker status:", status)
         print("Text relevance scores:", result["text_scores"])
         print("Visual relevance scores:", result["image_scores"])
+        if status.get("transformers_version") != "4.48.3":
+            raise RuntimeError(
+                "Reranker worker is not using transformers==4.48.3. "
+                "Run: zsh scripts/setup_reranker_env.sh"
+            )
         if not result["text_relevant_ranked_higher"]:
             raise RuntimeError(
-                "Reranker loaded, but the obvious relevant text did not outrank the unrelated control."
+                "Reranker loaded with the compatibility runtime, but the obvious "
+                "relevant text did not outrank the unrelated control."
             )
-        print("\njina-reranker-m0 preflight OK")
+        print("\njina-reranker-m0 isolated-worker preflight OK")
     except Exception:
         print("\njina-reranker-m0 preflight FAILED. Full traceback:\n")
         traceback.print_exc()
+        print(
+            "\nIf the error mentions the reranker Python environment, run:\n"
+            "  zsh scripts/setup_reranker_env.sh\n"
+            "Then rerun:\n"
+            "  python scripts/check_reranker.py"
+        )
         raise SystemExit(1)
+    finally:
+        reranker.close()
 
 
 if __name__ == "__main__":
