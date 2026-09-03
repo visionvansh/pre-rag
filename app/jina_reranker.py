@@ -1,7 +1,10 @@
 from __future__ import annotations
 
-import math
+import json
 import os
+import select
+import subprocess
+import uuid
 from pathlib import Path
 from threading import Lock
 from typing import Any
@@ -9,46 +12,36 @@ from typing import Any
 from .config import settings
 
 
-# Must be present before torch/MPS initializes. Unsupported MPS ops may then fall
-# back to CPU instead of crashing the entire local search request.
-os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 class JinaM0Reranker:
-    """Lazy local wrapper around jinaai/jina-reranker-m0.
+    """Client for an isolated persistent jina-reranker-m0 worker.
+
+    The main app intentionally keeps its newer Transformers stack for Jina-v5
+    Omni/Qwen3-VL. m0 runs in .venv-reranker with Transformers 4.48.3 because
+    its Qwen2-VL checkpoint/custom code uses the pre-refactor parameter layout.
 
     Dense Jina-v5/Weaviate retrieval decides which candidates enter stage two.
-    This model alone decides the ordering inside the stage-two result list.
+    m0 alone decides the ordering inside the stage-two result list.
     """
 
     def __init__(self, model_path: Path):
         self.model_path = Path(model_path)
-        self.model = None
-        self.torch = None
-        self.device = None
-        self._load_lock = Lock()
-        self._infer_lock = Lock()
+        self._proc: subprocess.Popen[str] | None = None
+        self._rpc_lock = Lock()
+        self._cached_status: dict[str, Any] | None = None
+
+    @property
+    def worker_python(self) -> Path:
+        path = Path(settings.reranker_python_path).expanduser()
+        if not path.is_absolute():
+            path = PROJECT_ROOT / path
+        return path.resolve()
 
     @property
     def loaded(self) -> bool:
-        return self.model is not None
-
-    def _resolve_device(self, torch) -> str:
-        requested = str(settings.reranker_device or "auto").strip().lower()
-        if requested == "auto":
-            if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-                return "mps"
-            return "cpu"
-        if requested == "mps":
-            if not (hasattr(torch.backends, "mps") and torch.backends.mps.is_available()):
-                raise RuntimeError(
-                    "RERANKER_DEVICE=mps was requested, but PyTorch MPS is unavailable. "
-                    "Use RERANKER_DEVICE=cpu or fix the Apple-Silicon PyTorch install."
-                )
-            return "mps"
-        if requested == "cpu":
-            return "cpu"
-        raise ValueError("RERANKER_DEVICE must be one of: auto, mps, cpu")
+        return bool(self._cached_status and self._cached_status.get("loaded"))
 
     def _validate_local_checkpoint(self) -> None:
         if not self.model_path.is_dir():
@@ -68,71 +61,147 @@ class JinaM0Reranker:
                 + "\n- ".join(missing)
             )
 
-    def load(self) -> None:
-        if self.loaded:
+    def _validate_worker_python(self) -> None:
+        if self.worker_python.is_file():
+            return
+        raise FileNotFoundError(
+            f"Dedicated reranker Python not found: {self.worker_python}\n"
+            "Create it with: ./scripts/setup_reranker_env.sh\n"
+            "Do not downgrade Transformers in the main .venv; Jina-v5 Omni needs the newer stack."
+        )
+
+    def _worker_env(self) -> dict[str, str]:
+        env = dict(os.environ)
+        env.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+        env["JINA_RERANKER_PATH"] = str(self.model_path.resolve())
+        env["RERANKER_DEVICE"] = str(settings.reranker_device)
+        env["RERANKER_TEXT_BATCH_SIZE"] = str(settings.reranker_text_batch_size)
+        env["RERANKER_IMAGE_BATCH_SIZE"] = str(settings.reranker_image_batch_size)
+        env["RERANKER_TEXT_MAX_LENGTH"] = str(settings.reranker_text_max_length)
+        env["RERANKER_IMAGE_MAX_LENGTH"] = str(settings.reranker_image_max_length)
+        env["RERANKER_QUERY_MAX_LENGTH"] = str(settings.reranker_query_max_length)
+        env["RERANKER_ATTN_IMPLEMENTATION"] = str(settings.reranker_attn_implementation)
+        return env
+
+    def _start_worker(self) -> None:
+        if self._proc is not None and self._proc.poll() is None:
             return
         if not settings.reranker_enabled:
             raise RuntimeError("Reranking is disabled by RERANKER_ENABLED=false")
+        self._validate_local_checkpoint()
+        self._validate_worker_python()
 
-        with self._load_lock:
-            if self.loaded:
-                return
-            self._validate_local_checkpoint()
+        worker = PROJECT_ROOT / "scripts" / "reranker_worker.py"
+        self._proc = subprocess.Popen(
+            [str(self.worker_python), "-u", str(worker)],
+            cwd=str(PROJECT_ROOT),
+            env=self._worker_env(),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            # Keep stderr visible in the terminal. Model/tqdm diagnostics must never
+            # share stdout with the JSON-line RPC protocol.
+            stderr=None,
+            text=True,
+            bufsize=1,
+        )
+        try:
+            self._cached_status = self._rpc_unlocked("status")
+        except Exception:
+            self.close()
+            raise
 
-            import torch
-            from transformers import AutoModel
+    def _readline_with_timeout(self) -> str:
+        if self._proc is None or self._proc.stdout is None:
+            raise RuntimeError("Reranker worker is not running")
+        timeout = float(settings.reranker_worker_timeout_sec)
+        ready, _, _ = select.select([self._proc.stdout], [], [], timeout)
+        if not ready:
+            raise TimeoutError(
+                f"Reranker worker did not respond within {timeout:g}s. "
+                "The first MPS model load can be slow; increase RERANKER_WORKER_TIMEOUT_SEC if needed."
+            )
+        line = self._proc.stdout.readline()
+        if not line:
+            code = self._proc.poll()
+            raise RuntimeError(f"Reranker worker exited unexpectedly (exit code {code})")
+        return line
 
-            device = self._resolve_device(torch)
-            kwargs: dict[str, Any] = {
-                "trust_remote_code": True,
-                "local_files_only": True,
-                "torch_dtype": "auto",
-            }
-            attention = str(settings.reranker_attn_implementation or "").strip()
-            if attention:
-                kwargs["attn_implementation"] = attention
+    def _rpc_unlocked(self, op: str, **payload: Any) -> Any:
+        if self._proc is None or self._proc.stdin is None:
+            raise RuntimeError("Reranker worker is not running")
+        request_id = uuid.uuid4().hex
+        message = {"id": request_id, "op": op, **payload}
+        self._proc.stdin.write(json.dumps(message, ensure_ascii=False) + "\n")
+        self._proc.stdin.flush()
 
-            model = AutoModel.from_pretrained(str(self.model_path.resolve()), **kwargs)
-            model.eval()
-            model.to(device)
+        raw = self._readline_with_timeout()
+        try:
+            response = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"Invalid JSON from reranker worker: {raw[:500]!r}") from exc
+        if response.get("id") != request_id:
+            raise RuntimeError("Reranker worker response ID mismatch")
+        if not response.get("ok"):
+            raise RuntimeError(str(response.get("error") or "Unknown reranker worker error"))
+        result = response.get("result")
+        if isinstance(result, dict) and "loaded" in result:
+            self._cached_status = result
+        return result
 
-            self.torch = torch
-            self.device = device
-            self.model = model
+    def _rpc(self, op: str, **payload: Any) -> Any:
+        with self._rpc_lock:
+            self._start_worker()
+            try:
+                return self._rpc_unlocked(op, **payload)
+            except (BrokenPipeError, RuntimeError):
+                # A dead child gets one clean restart. Model errors returned by a
+                # live worker are not retried blindly.
+                if self._proc is not None and self._proc.poll() is not None:
+                    self.close()
+                    self._start_worker()
+                    return self._rpc_unlocked(op, **payload)
+                raise
 
     def status(self) -> dict[str, Any]:
-        device = self.device
-        if device is None:
-            try:
-                import torch
-
-                device = self._resolve_device(torch)
-            except Exception:
-                device = "unavailable"
+        worker_running = self._proc is not None and self._proc.poll() is None
         return {
             "enabled": bool(settings.reranker_enabled),
             "model_path": str(self.model_path),
             "model_exists": self.model_path.is_dir(),
             "loaded": self.loaded,
-            "device": device,
+            "device": (self._cached_status or {}).get("device", str(settings.reranker_device)),
             "candidate_default": int(settings.reranker_candidate_limit),
             "candidate_max": int(settings.reranker_max_candidates),
             "text_max_length": int(settings.reranker_text_max_length),
             "image_max_length": int(settings.reranker_image_max_length),
+            "worker_python": str(self.worker_python),
+            "worker_python_exists": self.worker_python.is_file(),
+            "worker_running": worker_running,
+            "worker_transformers": (self._cached_status or {}).get("transformers_version"),
+            "worker_torch": (self._cached_status or {}).get("torch_version"),
         }
 
     @staticmethod
-    def _as_score_list(scores: Any, expected: int) -> list[float]:
-        if expected == 1 and isinstance(scores, (int, float)):
-            scores = [scores]
-        output = [float(value) for value in scores]
-        if len(output) != expected:
-            raise RuntimeError(
-                f"jina-reranker-m0 returned {len(output)} scores for {expected} documents"
-            )
-        if not all(math.isfinite(value) for value in output):
-            raise RuntimeError("jina-reranker-m0 returned NaN or Inf relevance scores")
-        return output
+    def _image_to_path(value: Any, cleanup: list[Path]) -> str:
+        if isinstance(value, (str, Path)):
+            path = Path(value).expanduser().resolve()
+            if not path.is_file():
+                raise FileNotFoundError(f"Reranker image file not found: {path}")
+            return str(path)
+
+        try:
+            from PIL import Image
+        except Exception as exc:  # pragma: no cover
+            raise RuntimeError("Pillow is required to materialize image reranker queries") from exc
+
+        if isinstance(value, Image.Image):
+            temp_dir = settings.app_data_dir / "reranker_tmp"
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            path = temp_dir / f"query-{uuid.uuid4().hex}.png"
+            value.convert("RGB").save(path, format="PNG")
+            cleanup.append(path)
+            return str(path.resolve())
+        raise TypeError(f"Unsupported image value for reranking: {type(value).__name__}")
 
     def score_documents(
         self,
@@ -149,64 +218,55 @@ class JinaM0Reranker:
         if doc_type not in {"text", "image"}:
             raise ValueError(f"Unsupported reranker doc_type: {doc_type}")
 
-        self.load()
-        batch_size = (
-            int(settings.reranker_image_batch_size)
-            if (query_type == "image" or doc_type == "image")
-            else int(settings.reranker_text_batch_size)
-        )
-        max_length = (
-            int(settings.reranker_image_max_length)
-            if (query_type == "image" or doc_type == "image")
-            else int(settings.reranker_text_max_length)
-        )
-        max_query_length = min(int(settings.reranker_query_max_length), max_length // 2)
-        pairs = [[query, document] for document in documents]
-
-        with self._infer_lock:
-            with self.torch.inference_mode():
-                scores = self.model.compute_score(
-                    pairs,
-                    batch_size=max(1, batch_size),
-                    max_length=max_length,
-                    max_query_length=max_query_length,
-                    query_type=query_type,
-                    doc_type=doc_type,
-                    normalize_scores=True,
-                    show_progress=False,
+        cleanup: list[Path] = []
+        try:
+            wire_query: Any = str(query) if query_type == "text" else self._image_to_path(query, cleanup)
+            wire_documents: list[Any] = (
+                [str(item) for item in documents]
+                if doc_type == "text"
+                else [self._image_to_path(item, cleanup) for item in documents]
+            )
+            result = self._rpc(
+                "score",
+                query=wire_query,
+                documents=wire_documents,
+                query_type=query_type,
+                doc_type=doc_type,
+            )
+            scores = [float(value) for value in result["scores"]]
+            if len(scores) != len(documents):
+                raise RuntimeError(
+                    f"jina-reranker-m0 returned {len(scores)} scores for {len(documents)} documents"
                 )
-        return self._as_score_list(scores, len(documents))
+            return scores
+        finally:
+            for path in cleanup:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     def preflight(self) -> dict[str, Any]:
-        """Exercise text and visual scoring without requiring user assets."""
-        from PIL import Image
+        return self._rpc("preflight")
 
-        self.load()
-        text_scores = self.score_documents(
-            "red sports car",
-            [
-                "A bright red sports car is parked beside the road.",
-                "This document explains how to bake sourdough bread.",
-            ],
-            query_type="text",
-            doc_type="text",
-        )
-
-        red = Image.new("RGB", (384, 384), (220, 30, 30))
-        blue = Image.new("RGB", (384, 384), (25, 70, 200))
-        image_scores = self.score_documents(
-            "a mostly red image",
-            [red, blue],
-            query_type="text",
-            doc_type="image",
-        )
-
-        return {
-            "status": self.status(),
-            "text_scores": text_scores,
-            "image_scores": image_scores,
-            "text_relevant_ranked_higher": bool(text_scores[0] > text_scores[1]),
-        }
+    def close(self) -> None:
+        proc = self._proc
+        self._proc = None
+        self._cached_status = None
+        if proc is None:
+            return
+        try:
+            if proc.stdin:
+                proc.stdin.close()
+        except OSError:
+            pass
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5)
 
 
 reranker = JinaM0Reranker(settings.jina_reranker_path)
