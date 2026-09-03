@@ -26,8 +26,12 @@ class Settings(BaseSettings):
     search_limit: int = 12
 
     # Stage-two reranking. Dense retrieval remains the candidate generator only.
+    # m0 is launched in a separate Python environment because its Qwen2-VL custom
+    # code is incompatible with the newer Transformers stack needed by Jina-v5 Omni.
     reranker_enabled: bool = True
     reranker_device: str = "auto"  # auto -> MPS on Apple Silicon when available
+    reranker_python_path: Path = Path(".venv-reranker/bin/python")
+    reranker_worker_timeout_sec: float = 900.0
     reranker_candidate_limit: int = 64
     reranker_max_candidates: int = 200
     reranker_text_batch_size: int = 4
