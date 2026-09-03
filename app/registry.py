@@ -26,10 +26,12 @@ class AssetRegistry:
     @staticmethod
     def asset_type(payload: dict) -> str:
         kind = payload.get("asset_type")
-        if kind in {"video", "images"}:
+        if kind in {"video", "images", "texts"}:
             return kind
         if payload.get("image_paths"):
             return "images"
+        if payload.get("text_paths"):
+            return "texts"
         return "video"
 
     def upsert(self, asset_id: str, payload: dict) -> None:
@@ -74,17 +76,28 @@ class AssetRegistry:
     def public_view(asset_id: str, payload: dict) -> dict:
         kind = AssetRegistry.asset_type(payload)
         image_paths = [Path(p) for p in (payload.get("image_paths") or [])]
+        text_paths = [Path(p) for p in (payload.get("text_paths") or [])]
+
+        video_chunk_seconds = 0.0
+        image_count = 0
+        text_file_count = 0
+        text_chunks = 0
+        preview_files: list[str] = []
+
         if kind == "video":
             video_path = Path(payload.get("video_path") or "")
             media_available = bool(payload.get("video_path")) and video_path.is_file()
-            image_count = 0
             video_chunk_seconds = float(
                 payload.get("video_chunk_seconds") or settings.video_chunk_seconds
             )
-        else:
+        elif kind == "images":
             media_available = any(p.is_file() for p in image_paths)
             image_count = int(payload.get("image_count") or len(image_paths))
-            video_chunk_seconds = 0.0
+        else:
+            media_available = any(p.is_file() for p in text_paths)
+            text_file_count = int(payload.get("text_file_count") or len(text_paths))
+            text_chunks = int(payload.get("text_chunks") or 0)
+            preview_files = [p.name for p in text_paths[:24]]
 
         return {
             "asset_id": asset_id,
@@ -96,6 +109,9 @@ class AssetRegistry:
             "video_chunks": int(payload.get("video_chunks") or 0),
             "transcript_chunks": int(payload.get("transcript_chunks") or 0),
             "image_count": image_count,
+            "text_file_count": text_file_count,
+            "text_chunks": text_chunks,
+            "preview_files": preview_files,
             "weaviate_objects": int(payload.get("weaviate_objects") or 0),
             "media_available": media_available,
         }
