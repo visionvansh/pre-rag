@@ -1,0 +1,16 @@
+fastapi>=0.116
+uvicorn[standard]>=0.35
+python-multipart>=0.0.20
+pydantic>=2.11
+pydantic-settings>=2.10
+weaviate-client>=4.16.4
+langchain-text-splitters>=0.3.9
+mlx>=0.23
+numpy>=2.0
+tokenizers>=0.21
+transformers>=4.57
+pillow>=11.0
+av>=15.0
+torch>=2.5
+torchvision
+pytest>=8.0
