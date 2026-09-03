@@ -24,6 +24,28 @@ The main FastAPI process stays in `.venv` with the newer Transformers version re
 
 The worker is lazy: it starts on the first reranked search/preflight, loads m0 once on MPS, then remains resident and communicates with the main app over local stdin/stdout JSON messages. No extra TCP port is opened.
 
+## Why the worker has an `mm_token_type_ids` bridge
+
+Jina's Sentence-Transformers v5.4 integration commit (`94bfe0a...`) updated `modeling.py` so `JinaVLForRanking.forward()` forwards `mm_token_type_ids` into the base Qwen2-VL model.
+
+That newer keyword is not accepted by the pre-refactor Qwen2-VL `forward()` in Transformers 4.48.3. However, 4.48.3 already computes the equivalent multimodal RoPE positions directly from the actual vision token IDs plus `image_grid_thw` / `video_grid_thw`.
+
+Therefore the worker installs a narrow, version-gated adapter at the Qwen2-VL base-class boundary:
+
+```text
+Jina forward(..., mm_token_type_ids=...)
+          ↓
+compat adapter accepts that one newer keyword
+          ↓
+Transformers 4.48.3 Qwen2-VL forward(...)
+          ↓
+4.48.3 derives multimodal RoPE from input_ids/grid_thw
+```
+
+The adapter does **not** alter embeddings, ranking logits, score normalization, image pixels, or candidate order. It only removes the keyword that the older base forward does not understand.
+
+The worker also requests Transformers loading diagnostics and refuses to run when there are missing or mismatched checkpoint weights. `lm_head.weight` is the only allowed unused key because Jina intentionally replaces the language-model head with `Identity` and uses the ranking `score` head instead.
+
 ## Local model path
 
 Default:
@@ -32,14 +54,26 @@ Default:
 /Volumes/vision/Downloads/codes_necessary/models/jina-reranker-m0
 ```
 
-## Recommended pinned download
+### Existing download at revision `94bfe0a...`
+
+You can keep it. The compatibility worker supports it and the 4.89 GB weights do not need to be downloaded again.
+
+### Recommended revision for a fresh direct-Transformers download
+
+Our app calls m0's `compute_score()` directly and does not use the Sentence-Transformers wrapper. For a new installation, prefer Jina's parent revision immediately before the Sentence-Transformers v5.4 integration:
+
+```text
+5b91da00be08ae2949e4e842b94d721c5c31eda3
+```
+
+The later `94bfe0a...` commit changed code/configuration files for Sentence Transformers but did not change `model.safetensors`, so the ranking weights are the same.
 
 ```bash
 HF_XET_HIGH_PERFORMANCE=1 \
 HF_HUB_DOWNLOAD_TIMEOUT=1800 \
 HF_HUB_ETAG_TIMEOUT=300 \
 hf download jinaai/jina-reranker-m0 \
-  --revision 94bfe0aeb2d4dd7978362699cddd5893d4e0adc8 \
+  --revision 5b91da00be08ae2949e4e842b94d721c5c31eda3 \
   --local-dir "/Volumes/vision/Downloads/codes_necessary/models/jina-reranker-m0"
 ```
 
@@ -69,15 +103,27 @@ python scripts/check_reranker_files.py
 python scripts/check_reranker.py
 ```
 
-`check_reranker.py` launches the isolated worker automatically. A healthy run must report:
+`check_reranker_files.py` reports whether the local `modeling.py` is the Sentence-Transformers-era source that needs the compatibility bridge or the earlier direct-Transformers source.
+
+`check_reranker.py` launches the isolated worker automatically. A healthy run must report values equivalent to:
 
 ```text
 transformers_version: 4.48.3
 architecture: qwen2_vl_pre_refactor
-text_relevant_ranked_higher: True
+mm_token_type_compat_applied: True
+checkpoint_loading_validated: True
 ```
 
-The worker also refuses to score if the loaded model exposes the incompatible `model.language_model` layout or if the expected `model.layers.0.self_attn.q_proj.weight` parameter is absent. This prevents silently reranking with randomly initialized layers.
+and the obvious relevant text must score above the unrelated control.
+
+The worker refuses to score if:
+
+- the loaded model exposes the incompatible `model.language_model` layout;
+- expected `model.layers.*` or ranking-head parameters are absent;
+- any checkpoint weight is missing or mismatched;
+- any unexpected checkpoint key other than the intentionally unused `lm_head.weight` appears.
+
+This prevents silently reranking with randomly initialized layers.
 
 ## Important configuration
 
