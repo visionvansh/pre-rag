@@ -70,11 +70,16 @@ def _load():
         raise FileNotFoundError(f"Jina v4 model path not found: {MODEL_PATH}")
 
     dtype = torch.float16 if _device == "mps" else torch.float32
+    # IMPORTANT: retrieval is an encoding/forward task label in the pinned v4
+    # snapshot. Passing task="retrieval" into AutoModel.from_pretrained leaks the
+    # keyword through the custom loader into JinaEmbeddingsV4Model.__init__ on the
+    # current stateless-adapter implementation and raises an unexpected-keyword
+    # TypeError. Keep model construction task-agnostic; _forward() selects the
+    # retrieval adapter through task_label="retrieval".
     kwargs: dict[str, Any] = {
         "trust_remote_code": True,
         "local_files_only": True,
         "torch_dtype": dtype,
-        "task": "retrieval",
     }
     if ATTENTION:
         kwargs["attn_implementation"] = ATTENTION
@@ -93,7 +98,8 @@ def _load():
             _log(f"attention override was rejected; retrying model load without it: {exc}")
             model = AutoModel.from_pretrained(str(MODEL_PATH), **kwargs)
 
-        processor = getattr(model, "processor", None)
+        core = _core_model(model)
+        processor = getattr(model, "processor", None) or getattr(core, "processor", None)
         if processor is None:
             processor = AutoProcessor.from_pretrained(
                 str(MODEL_PATH), trust_remote_code=True, local_files_only=True
