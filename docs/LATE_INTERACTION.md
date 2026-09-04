@@ -32,7 +32,7 @@ Pinned evaluation revision:
 Download to the default path used by `app/config.py`:
 
 ```bash
-HF_XET_HIGH_PERFORMANCE=1 \
+HF_HUB_DISABLE_XET=1 \
 HF_HUB_DOWNLOAD_TIMEOUT=1800 \
 HF_HUB_ETAG_TIMEOUT=300 \
 hf download jinaai/jina-embeddings-v4 \
@@ -40,7 +40,29 @@ hf download jinaai/jina-embeddings-v4 \
   --local-dir "/Volumes/vision/Downloads/codes_necessary/models/jina-embeddings-v4"
 ```
 
-The snapshot is roughly 7.9 GB. Do not use the GGUF variant for this lab: the experiment requires the trained 128-d multi-vector projection.
+The snapshot is roughly 7.9 GB. Do not use the GGUF or MLX-8bit variants for this lab: the experiment uses the official full checkpoint and its trained 128-d multi-vector projection.
+
+## Precision policy: no FP16 downgrade
+
+The official Jina v4 checkpoint is BF16. The worker now has a quality-first precision contract:
+
+```text
+MPS + auto  -> BF16
+CPU + auto  -> FP32
+explicit BF16 -> BF16
+explicit FP32 -> FP32
+FP16/float16 -> rejected
+```
+
+Configure it with:
+
+```text
+JINA_V4_DTYPE=auto
+```
+
+`auto` preserves the checkpoint's BF16 precision on Apple Silicon when the local MPS runtime passes a BF16 capability probe. If that probe fails, the worker falls back to full FP32, never FP16. No 4-bit/8-bit quantization is used by this runtime.
+
+The model forward is checked for non-finite values **before** FP32 normalization and before anything reaches Weaviate. A numerical failure therefore names the model output, device, dtype, and image context rather than being silently repaired or inserted.
 
 ## Isolated Apple-Silicon environment
 
@@ -62,12 +84,25 @@ python scripts/check_jina_v4.py
 The actual-model preflight requires:
 
 - arm64/MPS-compatible model loading
+- BF16 on supported MPS, or full FP32 fallback
+- no FP16 runtime
 - 2048-d dense output
 - N×128 multi-vector output
+- finite text and image inputs/outputs
 - obvious relevant text beats an unrelated text under reference MaxSim
-- a synthetic red image beats a blue control for a text query about a red image
+- synthetic text→image scoring is reported as a diagnostic only
 
 If this preflight fails, do not trust ingestion/search results.
+
+## Image-ingestion failure behavior
+
+Image batches are treated transactionally at the asset level. If image `N` fails after earlier images were inserted, the job now rolls back:
+
+- all Weaviate objects for that asset
+- the late-interaction registry entry
+- generated local thumbnails for that asset
+
+The failure detail also names the exact image and dimensions that triggered the model/processor error. A failed batch should therefore not leave a half-indexed asset behind.
 
 ## Weaviate
 
