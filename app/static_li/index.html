@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Jina v4 Late Interaction Lab</title>
+  <link rel="stylesheet" href="/li-static/styles.css" />
+</head>
+<body>
+  <main class="shell">
+    <header class="hero">
+      <div>
+        <a class="back" href="/">← Jina v5 Omni lab</a>
+        <p class="eyebrow">PARALLEL APPLE-SILICON RETRIEVAL EXPERIMENT</p>
+        <h1>Jina v4 · Dense vs Late Interaction vs m0</h1>
+        <p class="sub">Text + image only. One Jina-v4 backbone pass produces a 2048-d dense vector and N×128 late-interaction vectors. Weaviate searches both independently; m0 is an optional final stage.</p>
+      </div>
+      <div id="healthPill" class="pill neutral">Checking…</div>
+    </header>
+
+    <section class="grid two">
+      <article class="card">
+        <div class="card-head"><div><span class="step">01</span><h2>Ingest</h2></div><span class="muted">Separate collection and registry from the v5 lab.</span></div>
+        <label>Workflow
+          <select id="ingestMode"><option value="images">Image collection</option><option value="texts">Text collection</option></select>
+        </label>
+        <div class="tabs"><button id="pathTab" class="tab active" type="button">Mac paths</button><button id="uploadTab" class="tab" type="button">Browser upload</button></div>
+        <form id="pathForm" class="pane active">
+          <label id="pathLabel">Image file or folder path<input id="sourcePath" placeholder="/Volumes/vision/..." /></label>
+          <label>Asset label <span class="muted">optional</span><input id="assetName" /></label>
+          <button class="primary" type="submit">Start ingestion</button>
+        </form>
+        <form id="uploadForm" class="pane">
+          <label id="uploadLabel">Image files<input id="uploadFiles" type="file" multiple accept="image/*,.avif" /></label>
+          <label>Asset label <span class="muted">optional</span><input id="uploadAssetName" /></label>
+          <button class="primary" type="submit">Upload & ingest</button>
+        </form>
+      </article>
+
+      <article class="card">
+        <div class="card-head"><div><span class="step">02</span><h2>Pipeline progress</h2></div><strong id="percent">0%</strong></div>
+        <div class="progress"><div id="bar"></div></div>
+        <h3 id="stage">Waiting for input</h3>
+        <p id="detail" class="muted">Jina-v4 jobs will report here.</p>
+        <div class="metrics">
+          <div><span>Objects</span><strong id="objects">—</strong></div>
+          <div><span>Late vectors</span><strong id="lateVectors">—</strong></div>
+          <div><span>Text chunks</span><strong id="textChunks">—</strong></div>
+          <div><span>Images</span><strong id="images">—</strong></div>
+        </div>
+        <pre id="errorBox" class="error hidden"></pre>
+      </article>
+    </section>
+
+    <section class="card">
+      <div class="card-head"><div><span class="step">03</span><h2>Late-interaction asset library</h2></div><span class="muted">Does not touch <code>MediaChunk</code> or <code>data/assets.json</code>.</span></div>
+      <div class="library-row">
+        <select id="assetSelect"></select>
+        <button id="refreshAssets" class="secondary" type="button">Refresh</button>
+        <button id="removeAsset" class="danger" type="button">Remove LI index</button>
+      </div>
+      <div id="assetSummary" class="asset-summary">Loading…</div>
+    </section>
+
+    <section class="card">
+      <div class="card-head"><div><span class="step">04</span><h2>Query</h2></div><span class="muted">Image queries are experimental; v4 is strongest for text→text / text→image.</span></div>
+      <form id="searchForm">
+        <div class="query-grid">
+          <label>Query type<select id="queryType"><option value="text">Text query</option><option value="image">Image query (experimental)</option></select></label>
+          <label>Result modality<select id="modality"><option value="all">All</option><option value="text">Text only</option><option value="image">Images only</option></select></label>
+          <label>Final results<select id="limit"><option>8</option><option selected>12</option><option>24</option><option>40</option></select></label>
+          <label>Late candidate pool<select id="lateLimit"><option>32</option><option selected>64</option><option>100</option><option>160</option><option>200</option></select></label>
+          <label>m0 candidate pool<select id="m0Limit"><option>12</option><option>20</option><option selected>40</option><option>64</option><option>100</option></select></label>
+        </div>
+        <label id="textQueryWrap">Text query<input id="textQuery" placeholder="e.g. architecture diagram showing memory flow" /></label>
+        <label id="imageQueryWrap" class="hidden">Image query<input id="imageQuery" type="file" accept="image/*" /></label>
+        <label class="toggle"><input id="rerank" type="checkbox" checked /><span><strong>Run jina-reranker-m0</strong><small>When enabled, m0 alone determines the Stage-3 order.</small></span></label>
+        <button class="primary" type="submit">Run comparison</button>
+      </form>
+      <div id="diagnostics" class="diagnostics"></div>
+    </section>
+
+    <section class="results-grid">
+      <article class="card result-panel"><div class="panel-title"><span>Stage 1</span><h2>Jina v4 Dense · 2048d</h2></div><div id="denseResults" class="results"></div></article>
+      <article class="card result-panel accent"><div class="panel-title"><span>Stage 2</span><h2>Native Late Interaction · N×128</h2></div><div id="lateResults" class="results"></div></article>
+      <article class="card result-panel"><div class="panel-title"><span>Stage 3</span><h2>m0 Final · optional</h2></div><div id="m0Results" class="results"></div></article>
+    </section>
+  </main>
+  <script src="/li-static/app.js"></script>
+</body>
+</html>
