@@ -114,3 +114,42 @@ Removing an asset from the UI:
 - **does not delete original source files**
 
 This prevents an indexing action from accidentally deleting user media.
+
+---
+
+## Parallel Jina v4 late-interaction lab
+
+The existing architecture above remains available at `/`. A separate `/late-interaction` application tests Jina Embeddings v4 without changing `MediaChunk` or the v5 registry.
+
+```text
+text/image
+    ↓
+Jina Embeddings v4 retrieval adapter
+ONE Qwen2.5-VL backbone forward
+    │
+    ├─ single_vec_emb [2048]
+    │       ↓
+    │   dense_v4 named vector
+    │       ↓
+    │   ordinary HNSW diagnostic search
+    │
+    └─ multi_vec_emb [N,128]
+            ↓
+        remove padding positions
+            ↓
+        late_v4 named multi-vector
+            ↓
+        native Weaviate MaxSim retrieval
+            ↓
+        optional jina-reranker-m0
+```
+
+The late-interaction lab supports only `text` and `image`. It stores data in the separate `JinaV4LateChunk` collection and local metadata under `data/late_interaction/`.
+
+Search results are intentionally separated into three panels:
+
+1. Jina-v4 dense result order.
+2. Jina-v4 native late-interaction result order.
+3. Optional m0 order, with m0 score as the only Stage-3 ranking authority.
+
+See `docs/LATE_INTERACTION.md` for the pinned model revision, MPS environment, preflight and model download instructions.
