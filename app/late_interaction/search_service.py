@@ -99,6 +99,12 @@ def _resolve_m0_limit(requested: int | None, final_limit: int, late_count: int) 
     return min(late_count, max(final_limit, min(raw, 100)))
 
 
+def _prepare_v4_phase() -> None:
+    """Release m0 before Jina-v4 work when using Apple-Silicon low-memory mode."""
+    if settings.li_low_memory_mode:
+        reranker.close()
+
+
 def run_search(
     *,
     query: Any,
@@ -185,6 +191,7 @@ def run_search(
             "m0_error": m0_error,
             "m0_details": m0_details,
             "v4_status": embedder.status(),
+            "low_memory_mode": bool(settings.li_low_memory_mode),
         },
     }
 
@@ -200,6 +207,7 @@ def search_text(
     run_reranker: bool,
 ) -> dict[str, Any]:
     clean = query.strip()
+    _prepare_v4_phase()
     encoded = embedder.encode_text(clean, role="query")
     return run_search(
         query=clean,
@@ -227,6 +235,7 @@ def search_image(
     run_reranker: bool,
 ) -> dict[str, Any]:
     path = Path(path).expanduser().absolute()
+    _prepare_v4_phase()
     encoded = embedder.encode_image(path)
     return run_search(
         query=str(path),
