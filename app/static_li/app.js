@@ -1,6 +1,7 @@
 const $ = (id) => document.getElementById(id);
 let assets = [];
 let activeJob = null;
+let searchRunning = false;
 
 async function api(url, options={}) {
   const res = await fetch(url, options);
@@ -69,13 +70,27 @@ $('queryType').addEventListener('change',()=>{const image=$('queryType').value==
 function renderResults(id,rows,kind){const root=$(id);root.innerHTML='';if(!rows?.length){root.innerHTML='<p class="muted">No results.</p>';return;}rows.forEach((r,i)=>{const el=document.createElement('div');el.className='result';const rank=r.rerank_rank||r.late_rank||r.dense_rank||i+1;let media='';if(r.image_url)media=`<img loading="lazy" src="${r.thumbnail_url||r.image_url}" alt="${r.source_name||'result'}">`;let text=r.text?`<pre>${escapeHtml(r.text)}</pre>`:'';let score='';if(kind==='dense')score=`distance ${fmt(r.dense_distance)}`;if(kind==='late')score=`MaxSim/HNSW distance ${fmt(r.late_distance)} · ${r.late_vector_count||0} doc vectors`;if(kind==='m0')score=`m0 ${fmt(r.rerank_score)} · late rank ${r.late_rank||'—'}`;el.innerHTML=`<div class="result-head"><strong>#${rank} ${escapeHtml(r.source_name||r.chunk_id||'result')}</strong><span class="badge">${r.modality}</span></div>${media}${text}<div class="score">${score}</div>`;root.appendChild(el);});}
 function fmt(v){return v===null||v===undefined?'—':Number(v).toFixed(5)}function escapeHtml(s){return String(s).replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));}
 
-$('searchForm').addEventListener('submit',async(e)=>{e.preventDefault();try{
-  const type=$('queryType').value;const base={asset_id:$('assetSelect').value||null,modality:$('modality').value,limit:Number($('limit').value),late_candidate_limit:Number($('lateLimit').value),m0_candidate_limit:Number($('m0Limit').value),rerank:$('rerank').checked};let data;
-  if(type==='text'){const q=$('textQuery').value.trim();if(!q)throw new Error('Enter a text query');data=await api('/api/li/search/text',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...base,query:q})});}
-  else{const file=$('imageQuery').files[0];if(!file)throw new Error('Choose an image query');const fd=new FormData();fd.append('query_image',file);Object.entries(base).forEach(([k,v])=>{if(v!==null)fd.append(k,String(v))});data=await api('/api/li/search/image',{method:'POST',body:fd});}
-  renderResults('denseResults',data.dense_results,'dense');renderResults('lateResults',data.late_results,'late');renderResults('m0Results',data.m0_results,'m0');
-  const d=data.diagnostics||{};$('diagnostics').textContent=`Dense ${d.dense_ms} ms · Late ${d.late_ms} ms · m0 ${d.m0_ms} ms · total ${d.total_ms} ms · query late vectors ${d.query_late_vectors} · late candidates ${d.late_candidate_count}/${d.late_candidate_limit}`+(d.m0_error?` · m0 error: ${d.m0_error}`:'');
-}catch(err){$('diagnostics').textContent=`Search failed: ${err.message}`;}});
+$('searchForm').addEventListener('submit',async(e)=>{
+  e.preventDefault();
+  if(searchRunning)return;
+  const button=$('searchForm').querySelector('button[type="submit"]');
+  const originalLabel=button?.textContent||'Run comparison';
+  searchRunning=true;
+  if(button){button.disabled=true;button.textContent='Running comparison…';}
+  $('diagnostics').textContent='Running comparison… Jina v4 dense + late interaction first, then optional m0. On low-memory Mac mode the workers may be handed off between stages.';
+  try{
+    const type=$('queryType').value;const base={asset_id:$('assetSelect').value||null,modality:$('modality').value,limit:Number($('limit').value),late_candidate_limit:Number($('lateLimit').value),m0_candidate_limit:Number($('m0Limit').value),rerank:$('rerank').checked};let data;
+    if(type==='text'){const q=$('textQuery').value.trim();if(!q)throw new Error('Enter a text query');data=await api('/api/li/search/text',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...base,query:q})});}
+    else{const file=$('imageQuery').files[0];if(!file)throw new Error('Choose an image query');const fd=new FormData();fd.append('query_image',file);Object.entries(base).forEach(([k,v])=>{if(v!==null)fd.append(k,String(v))});data=await api('/api/li/search/image',{method:'POST',body:fd});}
+    renderResults('denseResults',data.dense_results,'dense');renderResults('lateResults',data.late_results,'late');renderResults('m0Results',data.m0_results,'m0');
+    const d=data.diagnostics||{};$('diagnostics').textContent=`Dense ${d.dense_ms} ms · Late ${d.late_ms} ms · m0 ${d.m0_ms} ms · total ${d.total_ms} ms · query late vectors ${d.query_late_vectors} · late candidates ${d.late_candidate_count}/${d.late_candidate_limit} · low-memory handoff ${d.low_memory_mode?'on':'off'}`+(d.m0_error?` · m0 error: ${d.m0_error}`:'');
+  }catch(err){
+    $('diagnostics').textContent=`Search failed: ${err.message}`;
+  }finally{
+    searchRunning=false;
+    if(button){button.disabled=false;button.textContent=originalLabel;}
+  }
+});
 
 $('ingestMode').addEventListener('change',updateMode);$('pathTab').onclick=()=>setTab(true);$('uploadTab').onclick=()=>setTab(false);
 updateMode();refreshHealth();refreshAssets();
