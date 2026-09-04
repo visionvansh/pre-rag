@@ -1,0 +1,11 @@
+# Isolated Jina Embeddings v4 runtime for Apple Silicon late-interaction experiments.
+# Keep this separate from requirements.txt and requirements-reranker.txt.
+transformers==4.57.1
+torch>=2.6
+torchvision
+peft>=0.15.2,<1.0
+pillow>=11.0
+numpy>=2.0
+safetensors>=0.4
+huggingface-hub>=0.32
+langchain-text-splitters>=0.3.9
