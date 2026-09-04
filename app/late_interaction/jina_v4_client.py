@@ -55,6 +55,7 @@ class JinaV4Client:
         env.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
         env["JINA_V4_MODEL_PATH"] = str(self.model_path.absolute())
         env["JINA_V4_DEVICE"] = str(settings.jina_v4_device)
+        env["JINA_V4_DTYPE"] = str(settings.jina_v4_dtype)
         env["JINA_V4_ATTN_IMPLEMENTATION"] = str(settings.jina_v4_attn_implementation)
         env["JINA_V4_TEXT_MAX_LENGTH"] = str(settings.jina_v4_text_max_length)
         env["JINA_V4_REVISION"] = str(settings.jina_v4_revision)
@@ -140,6 +141,7 @@ class JinaV4Client:
             "worker_running": running,
             "loaded": bool(self._cached_status and self._cached_status.get("loaded")),
             "device": (self._cached_status or {}).get("device", settings.jina_v4_device),
+            "dtype": (self._cached_status or {}).get("dtype", settings.jina_v4_dtype),
             "dense_dim": 2048,
             "late_dim": 128,
             "revision": str(settings.jina_v4_revision),
