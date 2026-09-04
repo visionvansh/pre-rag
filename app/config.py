@@ -19,6 +19,9 @@ class Settings(BaseSettings):
     jina_v4_python_path: Path = Path(".venv-jina-v4/bin/python")
     jina_v4_worker_timeout_sec: float = 1200.0
     jina_v4_device: str = "auto"
+    # Quality-first precision policy. `auto` means BF16 on MPS (the checkpoint's
+    # native dtype) and FP32 on CPU. FP16 is intentionally rejected by the worker.
+    jina_v4_dtype: str = "auto"
     jina_v4_attn_implementation: str = "eager"
     jina_v4_text_max_length: int = 8192
 
