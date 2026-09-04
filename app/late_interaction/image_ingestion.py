@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import shutil
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
@@ -57,7 +58,32 @@ def _set(job_id: str, pct: float, stage: str, detail: str, **counters) -> None:
     jobs.update(job_id, status="running", stage=stage, overall_pct=round(float(pct), 2), detail=detail, counters=counters)
 
 
+def _rollback_asset(asset_id: str | None, asset_dir: Path | None) -> list[str]:
+    """Best-effort cleanup so a failed image batch cannot leave a half-indexed asset."""
+    cleanup_errors: list[str] = []
+    if asset_id:
+        try:
+            store.delete_asset(asset_id)
+        except Exception as exc:
+            cleanup_errors.append(f"Weaviate rollback failed: {type(exc).__name__}: {exc}")
+        try:
+            registry.remove(asset_id)
+        except Exception as exc:
+            cleanup_errors.append(f"registry rollback failed: {type(exc).__name__}: {exc}")
+    if asset_dir is not None:
+        try:
+            shutil.rmtree(asset_dir, ignore_errors=False)
+        except FileNotFoundError:
+            pass
+        except Exception as exc:
+            cleanup_errors.append(f"local asset rollback failed: {type(exc).__name__}: {exc}")
+    return cleanup_errors
+
+
 def _run(job_id: str, image_paths: list[str], asset_name: str | None) -> None:
+    asset_id: str | None = None
+    asset_dir: Path | None = None
+    current_path: Path | None = None
     try:
         paths = [Path(value).expanduser().resolve() for value in image_paths]
         if not paths:
@@ -73,21 +99,36 @@ def _run(job_id: str, image_paths: list[str], asset_name: str | None) -> None:
         _set(job_id, 8, "Jina v4 worker", "Starting the isolated Jina v4 worker")
         embedder.status()
 
+        # Re-ingestion is transactional at the asset level: remove any previous copy
+        # before rebuilding, and remove the new partial copy if any image later fails.
         store.delete_asset(asset_id)
+        registry.remove(asset_id)
         asset_dir = settings.li_assets_dir / asset_id
+        shutil.rmtree(asset_dir, ignore_errors=True)
         thumbs_dir = asset_dir / "thumbs"
         thumbs_dir.mkdir(parents=True, exist_ok=True)
 
         late_total = 0
         total = len(paths)
         for index, path in enumerate(paths):
+            current_path = path
             # Decode locally before expensive model work so corrupt files fail clearly.
             with Image.open(path) as raw:
                 image = ImageOps.exif_transpose(raw).convert("RGB")
+                width, height = image.size
                 thumb = image.copy()
-            encoded = embedder.encode_image(path)
+
+            try:
+                encoded = embedder.encode_image(path)
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Jina v4 image embedding failed for image {index + 1}/{total}: "
+                    f"{path.name} ({width}x{height}). {exc}"
+                ) from exc
+
             late_count = int(encoded["late_vector_count"])
             late_total += late_count
+            runtime_dtype = str(encoded.get("runtime_dtype") or settings.jina_v4_dtype)
 
             thumb.thumbnail((720, 720))
             thumb_name = f"{index:05d}.jpg"
@@ -116,7 +157,7 @@ def _run(job_id: str, image_paths: list[str], asset_name: str | None) -> None:
                 job_id,
                 10 + 86 * (done / total),
                 "Embed/index images",
-                f"Image {done}/{total} indexed · {late_total:,} late vectors",
+                f"Image {done}/{total} indexed · {late_total:,} late vectors · {runtime_dtype}",
                 image_total=total,
                 image_done=done,
                 late_vectors=late_total,
@@ -151,7 +192,18 @@ def _run(job_id: str, image_paths: list[str], asset_name: str | None) -> None:
             counters={"image_total": total, "image_done": total, "late_vectors": late_total, "weaviate_objects": object_count},
         )
     except Exception as exc:
-        jobs.update(job_id, status="failed", stage="Failed", error=f"{type(exc).__name__}: {exc}", detail=traceback.format_exc())
+        cleanup_errors = _rollback_asset(asset_id, asset_dir)
+        failing = f"\nFailing image: {current_path}" if current_path is not None else ""
+        cleanup_note = ""
+        if cleanup_errors:
+            cleanup_note = "\nRollback warnings:\n- " + "\n- ".join(cleanup_errors)
+        jobs.update(
+            job_id,
+            status="failed",
+            stage="Failed",
+            error=f"{type(exc).__name__}: {exc}",
+            detail=traceback.format_exc() + failing + cleanup_note,
+        )
 
 
 def run_image_ingestion(job_id: str, image_paths: list[str], asset_name: str | None = None) -> None:
