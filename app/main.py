@@ -16,6 +16,9 @@ from .image_ingestion import discover_image_paths, run_image_ingestion
 from .ingestion import run_ingestion
 from .jina_reranker import reranker
 from .job_store import jobs
+from .late_interaction.jina_v4_client import embedder as li_embedder
+from .late_interaction.routes import router as li_router
+from .late_interaction.weaviate_store import store as li_store
 from .registry import registry
 from .schemas import (
     ImagePathIngestRequest,
@@ -30,12 +33,20 @@ from .weaviate_store import store
 
 app = FastAPI(title="Jina v5 Omni Multimodal RAG Lab")
 STATIC_DIR = Path(__file__).parent / "static"
+LI_STATIC_DIR = Path(__file__).parent / "static_li"
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+app.mount("/li-static", StaticFiles(directory=LI_STATIC_DIR), name="li-static")
+app.include_router(li_router)
 
 
 @app.get("/")
 def index():
     return FileResponse(STATIC_DIR / "index.html")
+
+
+@app.get("/late-interaction")
+def late_interaction_index():
+    return FileResponse(LI_STATIC_DIR / "index.html")
 
 
 @app.get("/api/health")
@@ -60,6 +71,7 @@ def health():
         "transcript_chunk_tokens": settings.transcript_chunk_tokens,
         "transcript_overlap_tokens": settings.transcript_overlap_tokens,
         "supported_modalities": ["transcript", "video", "image", "text"],
+        "late_interaction_url": "/late-interaction",
     }
 
 
@@ -255,7 +267,7 @@ async def ingest_texts_upload(
             run_text_ingestion,
             job.id,
             [str(path) for path in paths],
-            asset_name,
+            request.asset_name,
         )
     )
     return {"job_id": job.id, "text_file_count": len(paths)}
@@ -362,3 +374,5 @@ def thumbnail(asset_id: str, chunk_index: int):
 @app.on_event("shutdown")
 def shutdown():
     store.close()
+    li_store.close()
+    li_embedder.close()
