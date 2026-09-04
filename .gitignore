@@ -1,5 +1,6 @@
 .venv/
 .venv-reranker/
+.venv-jina-v4/
 .env
 __pycache__/
 *.py[cod]
