@@ -43,7 +43,10 @@ class Settings(BaseSettings):
     li_late_candidate_limit: int = 64
     li_late_max_candidates: int = 200
     li_m0_candidate_limit: int = 40
-    li_low_memory_mode: bool = False
+    # Apple Silicon unified memory is shared by Jina-v4 and m0. Default to an
+    # explicit handoff so both large PyTorch models are not resident between LI
+    # comparison phases. Users with ample unified memory can opt out in .env.
+    li_low_memory_mode: bool = True
 
     # Stage-two reranking. Dense retrieval remains the candidate generator only.
     # m0 is launched in a separate Python environment because its Qwen2-VL custom
