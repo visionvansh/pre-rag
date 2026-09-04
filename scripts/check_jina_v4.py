@@ -20,6 +20,9 @@ def _require_health(label: str, health: dict) -> None:
         raise RuntimeError(f"{label}: dense output contains non-finite values")
     if not health.get("multi_finite"):
         raise RuntimeError(f"{label}: late output contains non-finite values")
+    dtype = str(health.get("runtime_dtype") or "")
+    if dtype and dtype not in {"bfloat16", "float32"}:
+        raise RuntimeError(f"{label}: unsupported runtime dtype {dtype}; FP16 is not allowed")
 
 
 print("Project root:", ROOT)
@@ -36,6 +39,16 @@ try:
     if status.get("dense_dim") != 2048 or status.get("late_dim") != 128:
         raise RuntimeError("Unexpected declared Jina v4 output dimensions")
 
+    dtype = str(status.get("dtype") or "")
+    if dtype not in {"bfloat16", "float32"}:
+        raise RuntimeError(
+            f"Jina v4 is running with unexpected dtype {dtype!r}; expected BF16 or full FP32"
+        )
+    if dtype == "float32":
+        print("Precision note: running full FP32 (quality-preserving fallback, higher memory use).")
+    else:
+        print("Precision note: running native BF16 checkpoint precision on MPS.")
+
     _require_health("text query", result["text"]["query_health"])
     _require_health("text passage", result["text"]["passage_health"])
     _require_health("image query", result["image"]["query_health"])
@@ -50,7 +63,7 @@ try:
         "Synthetic text→image diagnostic (not a hard gate): red_ranked_higher =",
         result["image"]["red_ranked_higher"],
     )
-    print("\nJina v4 dense + late-interaction MPS preflight OK")
+    print("\nJina v4 dense + late-interaction precision preflight OK")
 except Exception:
     print("\nJina v4 preflight FAILED:\n")
     traceback.print_exc()
