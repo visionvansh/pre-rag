@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 import contextlib
-import inspect
 import json
+import math
 import os
 import sys
 import traceback
@@ -44,9 +44,11 @@ def _resolve_device(torch) -> str:
 
 
 def _core_model(model):
-    # Current v4 loads as the embedding model itself. Older compatible snapshots
-    # sometimes exposed a thin wrapper with the embedding model in .model.
-    if hasattr(model, "multi_vector_projector") and hasattr(model, "processor"):
+    # Current v4 can be returned through a PEFT wrapper. Attribute access on the
+    # wrapper delegates to the underlying embedding model, so we keep the wrapper
+    # when it exposes Jina's multi-vector projector; that preserves the retrieval
+    # LoRA adapter path.
+    if hasattr(model, "multi_vector_projector"):
         return model
     inner = getattr(model, "model", None)
     if inner is not None and hasattr(inner, "multi_vector_projector"):
@@ -70,16 +72,13 @@ def _load():
         raise FileNotFoundError(f"Jina v4 model path not found: {MODEL_PATH}")
 
     dtype = torch.float16 if _device == "mps" else torch.float32
-    # IMPORTANT: retrieval is an encoding/forward task label in the pinned v4
-    # snapshot. Passing task="retrieval" into AutoModel.from_pretrained leaks the
-    # keyword through the custom loader into JinaEmbeddingsV4Model.__init__ on the
-    # current stateless-adapter implementation and raises an unexpected-keyword
-    # TypeError. Keep model construction task-agnostic; _forward() selects the
-    # retrieval adapter through task_label="retrieval".
+    # Retrieval is selected at forward/encoding time in the pinned v4 snapshot.
+    # Do not pass task="retrieval" to from_pretrained: the custom loader can leak
+    # that keyword into JinaEmbeddingsV4Model.__init__, which does not accept it.
     kwargs: dict[str, Any] = {
         "trust_remote_code": True,
         "local_files_only": True,
-        "torch_dtype": dtype,
+        "dtype": dtype,
     }
     if ATTENTION:
         kwargs["attn_implementation"] = ATTENTION
@@ -127,10 +126,13 @@ def _forward(batch: dict[str, Any]) -> tuple[list[float], list[list[float]]]:
     model = _load()
     core = _core_model(model)
     moved = _move_batch(batch)
-    forward_params = inspect.signature(core.forward, follow_wrapped=False).parameters
     kwargs = dict(moved)
-    if "task_label" in forward_params:
-        kwargs["task_label"] = "retrieval"
+
+    # IMPORTANT: JinaEmbeddingsV4Model.forward requires task_label. A PEFT wrapper
+    # exposes a generic forward signature, so signature introspection is unreliable.
+    # PEFT forwards this kwarg to the Jina base model, which then selects the
+    # retrieval adapter for both the single-vector and multi-vector outputs.
+    kwargs["task_label"] = "retrieval"
 
     with _torch.inference_mode(), contextlib.redirect_stdout(sys.stderr):
         output = core(**kwargs)
@@ -141,15 +143,34 @@ def _forward(batch: dict[str, Any]) -> tuple[list[float], list[list[float]]]:
     if mask is not None:
         multi_tensor = multi_tensor[mask[0].bool()]
 
-    # Jina normalizes both outputs, but re-normalizing keeps the storage contract explicit.
+    # Jina already normalizes these representations. Re-normalization makes our
+    # storage contract explicit and keeps dense/MaxSim behavior deterministic.
     dense_tensor = _torch.nn.functional.normalize(dense_tensor, p=2, dim=-1)
     multi_tensor = _torch.nn.functional.normalize(multi_tensor, p=2, dim=-1)
     return dense_tensor.cpu().tolist(), multi_tensor.cpu().tolist()
 
 
+def _embedding_health(result: dict[str, Any]) -> dict[str, Any]:
+    dense = result.get("dense") or []
+    multi = result.get("multi") or []
+    dense_finite = bool(dense) and all(math.isfinite(float(v)) for v in dense)
+    multi_finite = bool(multi) and all(
+        math.isfinite(float(v)) for vector in multi for v in vector
+    )
+    return {
+        "dense_dim": len(dense),
+        "late_dim": len(multi[0]) if multi else 0,
+        "late_vector_count": len(multi),
+        "dense_finite": dense_finite,
+        "multi_finite": multi_finite,
+    }
+
+
 def _process_text(text: str, role: str) -> dict[str, Any]:
     if role not in {"query", "passage"}:
         raise ValueError("role must be query or passage")
+    if not text.strip():
+        raise ValueError("text must not be empty")
     _load()
     prefix = "Query" if role == "query" else "Passage"
     batch = _processor.process_texts(
@@ -215,6 +236,8 @@ def _chunk_text(text: str, chunk_size: int, overlap: int) -> dict[str, Any]:
 
 
 def _maxsim(q: list[list[float]], d: list[list[float]]) -> float:
+    if not q or not d:
+        raise ValueError("MaxSim requires non-empty multi-vector inputs")
     q_tensor = _torch.tensor(q, dtype=_torch.float32)
     d_tensor = _torch.tensor(d, dtype=_torch.float32)
     return float((q_tensor @ d_tensor.T).max(dim=1).values.sum().item())
@@ -273,16 +296,20 @@ def _preflight() -> dict[str, Any]:
     return {
         "status": _status(load=True),
         "text": {
+            "query_health": _embedding_health(query),
+            "passage_health": _embedding_health(relevant),
             "relevant_score": relevant_score,
             "unrelated_score": unrelated_score,
             "relevant_ranked_higher": relevant_score > unrelated_score,
-            "query_late_vectors": query["late_vector_count"],
         },
         "image": {
+            "query_health": _embedding_health(image_query),
+            "image_health": _embedding_health(red),
             "red_score": red_score,
             "blue_score": blue_score,
+            # Diagnostic only: solid-color squares are intentionally not a hard
+            # semantic correctness gate for a multimodal retrieval model.
             "red_ranked_higher": red_score > blue_score,
-            "red_late_vectors": red["late_vector_count"],
         },
     }
 
